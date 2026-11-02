@@ -69,3 +69,11 @@ Pause, observed sleep/lock, ignored apps and known private windows block credit.
 ## App identity
 
 Worktempo is the new display name for Productive Hours. The bundle identifier, executable and existing `ProductiveHours` data folder intentionally stay unchanged, preserving settings, local history and launch-at-login identity. `Resources/Worktempo.png` is the original logo artwork. `scripts/build-icon.sh` generates all standard macOS icon sizes into the build directory; app packaging includes the resulting ICNS.
+
+## Schedule pace and forecast
+
+Main status compares logged productive time with your configured target range multiplied by the fraction of this week's scheduled work hours already elapsed. It works on day one, uses your reporting timezone and workdays, and does not assume missing hours were productive. A one-minute tolerance absorbs checkpoint latency; menu pace transitions retain their five-minute stabilization.
+
+The weekly forecast remains separate and needs three usable days. The dashboard displays expected-by-now versus logged time even while that forecast calibrates.
+
+The overview burnup chart plots daily cumulative productive time, a dashed pace line toward the upper target, and the weekly target band. The pace line advances during configured working hours and stays flat outside them. Future actual points are omitted.

@@ -26,6 +26,13 @@ public struct WeeklyMetrics: Sendable {
     public var minimum: Double
     public var maximum: Double
     public var remainingCapacity: Double
+    public var scheduledCapacity: Double
+    public var elapsedScheduleFraction: Double {
+        guard scheduledCapacity > 0 else { return 0 }
+        return min(1, max(0, 1 - remainingCapacity / scheduledCapacity))
+    }
+    public var expectedMinimum: Double { minimum * elapsedScheduleFraction }
+    public var expectedMaximum: Double { maximum * elapsedScheduleFraction }
     public var projection: Double?
     public var projectionLow: Double?
     public var projectionHigh: Double?
@@ -34,14 +41,53 @@ public struct WeeklyMetrics: Sendable {
     public var headroom: Double { max(0, maximum - productive) }
     public var overage: Double { max(0, productive - maximum) }
     public var status: String {
+        guard scheduledCapacity > 0 else { return "Set work schedule" }
         if remainingCapacity == 0 { return productive < minimum ? "Below target" : (productive > maximum ? "Above target" : "Target met") }
         if productive > maximum { return "Above target" }
-        guard let projection else { return productive >= minimum ? "Minimum met" : "Calibrating" }
-        return projection < minimum ? "Behind pace" : (projection > maximum ? "Above pace" : "On track")
+        if productive >= minimum { return "Minimum met" }
+        if elapsedScheduleFraction == 0 && productive == 0 { return "Schedule not started" }
+        // One minute absorbs checkpoint latency, not missing work or forecast uncertainty.
+        if productive + 60 < expectedMinimum { return "Behind pace" }
+        if productive > expectedMaximum + 60 { return "Above pace" }
+        return "On track"
     }
 }
 
 public enum Metrics {
+    public struct BurnupPoint: Identifiable, Sendable {
+        public var date: Date
+        public var seconds: Double
+        public var id: Date { date }
+    }
+    /// The target pace advances only during scheduled work. Actual values are daily
+    /// cumulative observations; never draw unobserved future actuals.
+    public static func burnup(week: WeeklyMetrics, now: Date, settings: AppSettings) -> (planned: [BurnupPoint], actual: [BurnupPoint]) {
+        var planned = [BurnupPoint(date: week.start, seconds: 0)]
+        var actual: [BurnupPoint] = now >= week.start ? [.init(date: week.start, seconds: 0)] : []
+        var scheduled = 0.0, logged = 0.0
+        for day in week.days {
+            if let work = schedule(on: day.date, settings: settings), week.scheduledCapacity > 0 {
+                planned.append(.init(date: work.start, seconds: week.maximum * scheduled / week.scheduledCapacity))
+                scheduled += work.duration
+                planned.append(.init(date: work.end, seconds: week.maximum * scheduled / week.scheduledCapacity))
+            }
+            guard day.date < now else { continue }
+            logged += day.productive
+            let end = settings.calendar.date(byAdding: .day, value: 1, to: day.date)!
+            actual.append(.init(date: min(end, now), seconds: logged))
+        }
+        if planned.last?.date != week.end {
+            planned.append(.init(date: week.end, seconds: planned.last?.seconds ?? 0))
+        }
+        // Adjacent full-day shifts can share a boundary; keep chart IDs unique.
+        var uniquePlan: [BurnupPoint] = []
+        for point in planned {
+            if uniquePlan.last?.date == point.date { uniquePlan[uniquePlan.count - 1] = point }
+            else { uniquePlan.append(point) }
+        }
+        return (uniquePlan, actual)
+    }
+
     public static func dayLabel(_ date: Date, calendar: Calendar) -> String {
         let formatter = DateFormatter(); formatter.calendar = calendar; formatter.timeZone = calendar.timeZone
         formatter.setLocalizedDateFormatFromTemplate("EEE MMM d yyyy")
@@ -105,11 +151,13 @@ public enum Metrics {
         let bounds = c.dateInterval(of: .weekOfYear, for: date)!
         var days: [DayTotal] = []
         var capacity = 0.0
+        var scheduledCapacity = 0.0
         for offset in 0..<7 {
             let day = c.date(byAdding: .day, value: offset, to: bounds.start)!
             let key = dayKey(day, calendar: c)
             days.append(totals.first { $0.id == key } ?? DayTotal(id: key, date: day))
             if let schedule = schedule(on: day, settings: settings) {
+                scheduledCapacity += schedule.duration
                 capacity += max(0, schedule.end.timeIntervalSince(max(now, schedule.start)))
             }
         }
@@ -130,7 +178,7 @@ public enum Metrics {
         let yield = min(1, max(0, numerator / max(1, denominator)))
         return WeeklyMetrics(start: bounds.start, end: bounds.end, days: days,
             minimum: settings.minimumHours * 3600, maximum: settings.maximumHours * 3600,
-            remainingCapacity: capacity, projection: confident ? productive + capacity * yield : nil,
+            remainingCapacity: capacity, scheduledCapacity: scheduledCapacity, projection: confident ? productive + capacity * yield : nil,
             projectionLow: confident ? productive + capacity * (yields.min() ?? yield) : nil,
             projectionHigh: confident ? productive + capacity * (yields.max() ?? yield) : nil, usableDays: usable.count)
     }

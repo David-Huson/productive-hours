@@ -99,11 +99,18 @@ struct OverviewView: View {
                 GroupBox("Weekly pace") {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(week.status).font(.headline)
+                        WeekBurnupChart(week: week, settings: service.settings).zIndex(1)
+                        if week.scheduledCapacity > 0 {
+                            Text("Expected by now: \(Metrics.duration(week.expectedMinimum))–\(Metrics.duration(week.expectedMaximum)) · logged: \(Metrics.duration(week.productive))")
+                            Text("Pace uses your target and elapsed scheduled hours. Untracked time is not assumed productive.").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Divider()
+                        Text("Weekly forecast").font(.subheadline.weight(.semibold))
                         if let projection = week.projection {
                             Text("Projected total \(Metrics.duration(projection)) · range \(Metrics.duration(week.projectionLow ?? projection))–\(Metrics.duration(week.projectionHigh ?? projection))")
                             Text("Range uses recent daily yields, not a statistical confidence interval. \(week.usableDays) usable days; 28-day lookback with recency weighting.").font(.caption).foregroundStyle(.secondary)
                         } else {
-                            Text("Low confidence. Need three usable scheduled workdays and adequate coverage before forecasting.")
+                            Text("Forecast calibrating: needs three usable scheduled workdays and adequate coverage. Your schedule-based pace is available immediately.")
                         }
                         if week.remainingCapacity > 0 {
                             let equivalents = week.remainingCapacity / Double((service.settings.endHour - service.settings.startHour) * 3600)
@@ -111,7 +118,7 @@ struct OverviewView: View {
                             Text("Remaining scheduled capacity: \(Metrics.duration(week.remainingCapacity)). Includes only the unelapsed portion of today.").font(.caption)
                         } else { Text(week.remaining > 0 ? "Schedule complete; minimum not reached." : "Schedule complete.") }
                     }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
-                }
+                }.zIndex(1)
                 GroupBox("Work meetings") {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(service.callStatus)
@@ -140,9 +147,113 @@ struct OverviewView: View {
     }
 }
 
+private struct WeekBurnupChart: View {
+    @StateObject private var hover = HistoryHover()
+    let week: WeeklyMetrics
+    let settings: AppSettings
+    var body: some View {
+        let points = Metrics.burnup(week: week, now: Date(), settings: settings)
+        VStack(alignment: .leading, spacing: 6) {
+            Chart {
+                RectangleMark(xStart: .value("Start", week.start), xEnd: .value("End", week.end),
+                              yStart: .value("Minimum", week.minimum / 3600), yEnd: .value("Maximum", week.maximum / 3600))
+                    .foregroundStyle(.green.opacity(0.12))
+                RuleMark(y: .value("Minimum", week.minimum / 3600)).foregroundStyle(.green.opacity(0.6))
+                RuleMark(y: .value("Maximum", week.maximum / 3600)).foregroundStyle(.green.opacity(0.6))
+                ForEach(points.planned) { point in
+                    LineMark(x: .value("Date", point.date), y: .value("Hours", point.seconds / 3600))
+                        .foregroundStyle(by: .value("Series", "Target pace"))
+                        .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 4]))
+                }
+                ForEach(points.actual) { point in
+                    LineMark(x: .value("Date", point.date), y: .value("Hours", point.seconds / 3600))
+                        .foregroundStyle(by: .value("Series", "Logged productive"))
+                        .lineStyle(StrokeStyle(lineWidth: 3))
+                    PointMark(x: .value("Date", point.date), y: .value("Hours", point.seconds / 3600))
+                        .foregroundStyle(by: .value("Series", "Logged productive"))
+                }
+            }
+            .chartForegroundStyleScale(["Target pace": Color.secondary, "Logged productive": Color.blue])
+            .chartXScale(domain: week.start...week.end)
+            .chartYScale(domain: 0...max(week.maximum, week.productive) / 3600 * 1.1)
+            .chartXAxis { AxisMarks(values: .stride(by: .day)) { _ in AxisValueLabel(format: .dateTime.weekday(.abbreviated)) } }
+            .chartYAxisLabel("Cumulative hours")
+            .environment(\.calendar, settings.calendar)
+            .environment(\.timeZone, settings.calendar.timeZone)
+            .frame(height: 230)
+            .chartOverlay { proxy in
+                ChartDayHover(proxy: proxy, calendar: settings.calendar, hover: hover)
+            }
+            .overlay {
+                ChartHoverTooltip(hover: hover) {
+                    if let day = week.days.first(where: { $0.id == hover.dayID }) {
+                        let now = Date()
+                        let next = settings.calendar.date(byAdding: .day, value: 1, to: day.date)!
+                        let future = day.date > now
+                        let cutoff = future ? next : min(next, now)
+                        let planned = Metrics.week(containing: day.date, now: cutoff, totals: [], settings: settings).expectedMaximum
+                        let cumulative = week.days.filter { $0.date <= day.date }.reduce(0.0) { $0 + $1.productive }
+                        HistoryDayTooltip(day: day, calendar: settings.calendar,
+                            cumulative: future ? nil : cumulative, planned: planned,
+                            showActual: !future, period: future || next <= now ? "At day end" : "So far today")
+                            .allowsHitTesting(false)
+                    }
+                }
+            }
+            .zIndex(1)
+            .onChange(of: week.start) { hover.dayID = nil }
+            Text("Target band: \(Metrics.duration(week.minimum))–\(Metrics.duration(week.maximum)). Dashed pace distributes the upper target across scheduled work hours; blue shows daily cumulative logged time through now.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+}
+
 @MainActor
 private final class HistoryHover: ObservableObject {
     @Published var dayID: String?
+    @Published var point = CGPoint.zero
+}
+
+private struct ChartHoverTooltip<Content: View>: View {
+    @ObservedObject var hover: HistoryHover
+    @ViewBuilder var content: () -> Content
+    var body: some View {
+        GeometryReader { geometry in
+            let width = min(340.0, geometry.size.width)
+            let preferredX = hover.point.x + 16 + width <= geometry.size.width
+                ? hover.point.x + 16 : hover.point.x - width - 16
+            content()
+                .frame(width: width)
+                .fixedSize(horizontal: false, vertical: true)
+                .offset(x: min(max(0, preferredX), max(0, geometry.size.width - width)),
+                        y: hover.point.y + 16)
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+private struct ChartDayHover: View {
+    let proxy: ChartProxy
+    let calendar: Calendar
+    @ObservedObject var hover: HistoryHover
+    var body: some View {
+        GeometryReader { geometry in
+            Rectangle().fill(.clear).contentShape(Rectangle())
+                .onContinuousHover { phase in
+                    switch phase {
+                    case .active(let point):
+                        guard let anchor = proxy.plotFrame else { hover.dayID = nil; return }
+                        let plot = geometry[anchor]
+                        guard plot.contains(point), let date: Date = proxy.value(atX: point.x - plot.minX) else {
+                            hover.dayID = nil; return
+                        }
+                        hover.point = point
+                        hover.dayID = Metrics.dayKey(date, calendar: calendar)
+                    case .ended: hover.dayID = nil
+                    }
+                }
+        }
+    }
 }
 
 struct HistoryView: View {
@@ -159,29 +270,17 @@ struct HistoryView: View {
                 .environment(\.calendar, service.settings.calendar)
                 .environment(\.timeZone, service.settings.calendar.timeZone)
                 .chartOverlay { proxy in
-                    GeometryReader { geometry in
-                        Rectangle().fill(.clear).contentShape(Rectangle())
-                            .onContinuousHover { phase in
-                                switch phase {
-                                case .active(let point):
-                                    guard let anchor = proxy.plotFrame else { hover.dayID = nil; return }
-                                    let plot = geometry[anchor]
-                                    guard plot.contains(point),
-                                          let date: Date = proxy.value(atX: point.x - plot.minX) else {
-                                        hover.dayID = nil; return
-                                    }
-                                    hover.dayID = Metrics.dayKey(date, calendar: service.settings.calendar)
-                                case .ended: hover.dayID = nil
-                                }
-                            }
+                    ChartDayHover(proxy: proxy, calendar: service.settings.calendar, hover: hover)
+                }
+                .overlay {
+                    ChartHoverTooltip(hover: hover) {
+                        if let day = service.week.days.first(where: { $0.id == hover.dayID }) {
+                            HistoryDayTooltip(day: day, calendar: service.settings.calendar)
+                                .allowsHitTesting(false)
+                        }
                     }
                 }
-                .overlay(alignment: .topTrailing) {
-                    if let day = service.week.days.first(where: { $0.id == hover.dayID }) {
-                        HistoryDayTooltip(day: day, calendar: service.settings.calendar)
-                            .allowsHitTesting(false)
-                    }
-                }
+                .zIndex(1)
                 .onChange(of: service.weekOffset) { hover.dayID = nil }
                 ForEach(service.week.days) { day in
                     DisclosureGroup {
@@ -209,6 +308,10 @@ struct HistoryView: View {
 private struct HistoryDayTooltip: View {
     let day: DayTotal
     let calendar: Calendar
+    var cumulative: Double? = nil
+    var planned: Double? = nil
+    var showActual = true
+    var period: String? = nil
 
     private func hours(_ seconds: Double) -> String {
         let whole = Int(max(0, seconds).rounded())
@@ -227,19 +330,25 @@ private struct HistoryDayTooltip: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(Metrics.dayLabel(day.date, calendar: calendar)).fontWeight(.semibold)
-            row("Productive total", day.productive).fontWeight(.semibold)
-            row("Productive active", day.active)
-            row("Productive passive", day.passive)
-            row("Unproductive", day.unproductive)
-            row("Undefined", day.undefined)
-            row("Ignored", day.ignored)
-            row("Inactive", day.inactive)
-            row("Unknown / gaps", day.unknown)
+            if let period { Text(period).foregroundStyle(.secondary) }
+            if let cumulative { row("Cumulative productive", cumulative).fontWeight(.semibold) }
+            if let planned { row("Planned cumulative", planned) }
+            if planned != nil { Divider() }
+            if showActual {
+                row("Day productive total", day.productive).fontWeight(.semibold)
+                row("Productive active", day.active)
+                row("Productive passive", day.passive)
+                row("Unproductive", day.unproductive)
+                row("Undefined", day.undefined)
+                row("Ignored", day.ignored)
+                row("Inactive", day.inactive)
+                row("Unknown / gaps", day.unknown)
+            } else { Text("Future day · no actual hours yet").foregroundStyle(.secondary) }
         }
         .font(.caption)
         .padding(12)
-        .frame(width: 340)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .frame(maxWidth: .infinity)
+        .background(Color(nsColor: .windowBackgroundColor).opacity(1), in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(.secondary.opacity(0.25)))
         .shadow(radius: 4, y: 2)
         .accessibilityElement(children: .combine)

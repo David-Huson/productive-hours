@@ -21,7 +21,7 @@ final class TrackingService: ObservableObject {
     @Published var currentState: ActivityState = .unknown
     @Published var currentApp = ""
     @Published var status = "Paused"
-    @Published var stablePace = "Calibrating"
+    @Published var stablePace = "Loading"
     private var paceCandidate: (String, Date)?
     @Published var browserStatus = "Browser tracking disabled"
     @Published var callStatus = "No call observed"
@@ -116,7 +116,7 @@ final class TrackingService: ObservableObject {
         case "On track", "Target met", "Minimum met": return "checkmark.circle"
         case "Behind pace": return "arrow.down.right.circle"
         case "Above pace", "Above target": return "arrow.up.right.circle"
-        case "Calibrating": return "clock"
+        case "Loading", "Schedule not started": return "clock"
         default: return "exclamationmark.circle"
         }
     }
@@ -125,11 +125,15 @@ final class TrackingService: ObservableObject {
         if let error { return error }
         if !running { return "Tracking is paused. Paused time is a gap in the estimate." }
         if menuTitle == "Limited coverage" { return "Browser domain unavailable. Review browser access or set an explicit app rule." }
-        if liveWeek.projection == nil { return "Building history for a forecast. Actual totals are available in the dashboard." }
-        switch liveWeek.status {
-        case "Behind pace": return "Review classifications and plan the remaining scheduled work."
-        case "Above pace": return "You are projected above your target. Consider a suitable stopping point."
-        default: return "Your estimated productive time is on pace for the weekly target."
+        switch stablePace {
+        case "Behind pace": return "Logged productive time is below your target pace for the elapsed work schedule."
+        case "Above pace": return "Logged productive time is ahead of your target pace for the elapsed work schedule."
+        case "Minimum met", "Target met": return "You have reached your weekly minimum target."
+        case "Above target": return "Logged productive time is above your weekly maximum."
+        case "Below target": return "The work schedule has ended below your minimum target."
+        case "Set work schedule": return "Select workdays in Settings to calculate your target pace."
+        case "Schedule not started": return "Your scheduled workweek has not started yet."
+        default: return "Logged productive time is on pace for your target and elapsed work schedule."
         }
     }
     private func append(_ values: [Interval]) {
@@ -269,7 +273,7 @@ final class TrackingService: ObservableObject {
             totals = grouped.values.sorted { $0.date < $1.date }
             let next = liveWeek.status
             if next == stablePace { paceCandidate = nil }
-            else if ["Calibrating", "Minimum met", "Target met", "Above target", "Below target"].contains(next) || stablePace == "Calibrating" {
+            else if ["Set work schedule", "Schedule not started", "Minimum met", "Target met", "Above target", "Below target"].contains(next) || ["Loading", "Set work schedule", "Schedule not started"].contains(stablePace) {
                 stablePace = next; paceCandidate = nil
             } else if paceCandidate?.0 != next { paceCandidate = (next, Date()) }
             else if let candidate = paceCandidate, Date().timeIntervalSince(candidate.1) >= 300 { stablePace = next; paceCandidate = nil }
@@ -406,7 +410,9 @@ final class TrackingService: ObservableObject {
         else if menuTitle == "Limited coverage" { type = "coverage_degraded"; body = "Browser coverage is limited. Review browser access and classifications." }
         else if week.productive >= week.maximum { type = "maximum_reached"; body = "Your estimated productive time reached the weekly maximum." }
         else if week.productive >= week.minimum { type = "minimum_reached"; body = "Your estimated productive time reached the weekly minimum." }
-        else if let forecast, settings.calendar.component(.hour, from: now) >= settings.endHour { type = forecast; body = advice }
+        else if let forecast, let projection = week.projection, settings.calendar.component(.hour, from: now) >= settings.endHour {
+            type = forecast; body = "Based on recent activity, projected weekly productive time is \(Metrics.duration(projection)). Your target is \(Metrics.duration(week.minimum))–\(Metrics.duration(week.maximum))."
+        }
         guard let type else { return }
         let key = type + ":" + Metrics.dayKey(now, calendar: settings.calendar)
         guard NotificationPolicy.canDeliver(now: now, settings: settings, lastSent: notificationDates[key], snoozedUntil: max(snoozedUntil ?? .distantPast, typeSnoozes[type] ?? .distantPast)) else { return }
