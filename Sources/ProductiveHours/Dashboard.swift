@@ -387,9 +387,14 @@ struct SettingsView: View {
             }
             Section("Notifications and startup") {
                 Toggle("Alerts enabled", isOn: $service.editedSettings.notifications)
+                Stepper("Warn after \(service.editedSettings.effectiveIdleWarningSeconds) seconds without input", value: Binding(
+                    get: { service.editedSettings.effectiveIdleWarningSeconds },
+                    set: { service.editedSettings.idleWarningAfterSeconds = $0 }),
+                    in: 0...(service.editedSettings.activeMinutes * 60 - 5), step: 5)
+                Text("0 disables inactivity warnings. Warns once before passive time begins; resets after input. Respects quiet hours and snoozes. No warning during detected work calls.").font(.caption)
                 HStack { Button("Authorize notifications…") { service.enableNotifications() }; Button("Snooze alerts for one day") { service.snooze() } }
                 Menu("Snooze a specific alert for 24 hours") {
-                    ForEach(["behind_weekly_pace", "projected_over_maximum", "minimum_reached", "maximum_reached", "collection_stopped", "coverage_degraded"], id: \.self) { type in
+                    ForEach(["inactivity_warning", "behind_weekly_pace", "projected_over_maximum", "minimum_reached", "maximum_reached", "collection_stopped", "coverage_degraded"], id: \.self) { type in
                         Button(type.replacingOccurrences(of: "_", with: " ")) { service.snooze(type: type) }
                     }
                 }

@@ -1,5 +1,19 @@
 import Foundation
 
+/// One warning per idle episode, before the active-to-passive transition.
+public struct IdleWarningState: Sendable {
+    private var warned = false
+    public init() {}
+    public mutating func evaluate(idleMS: Int64?, warningSeconds: Int, activeMinutes: Int, eligible: Bool) -> Bool {
+        guard let idleMS, warningSeconds > 0 else { warned = false; return false }
+        let threshold = Int64(warningSeconds) * 1000
+        if idleMS < threshold { warned = false; return false }
+        guard eligible, !warned, idleMS < Int64(activeMinutes) * 60_000 else { return false }
+        warned = true
+        return true
+    }
+}
+
 public enum NotificationPolicy {
     public static func canDeliver(now: Date, settings: AppSettings, lastSent: Date?, snoozedUntil: Date?) -> Bool {
         guard settings.notifications, snoozedUntil.map({ $0 <= now }) ?? true else { return false }

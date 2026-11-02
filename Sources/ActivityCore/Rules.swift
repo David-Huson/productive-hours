@@ -59,6 +59,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var passiveMinutes = 5
     public var retentionDays = 90
     public var notifications = false
+    public var idleWarningAfterSeconds: Int?
+    public var effectiveIdleWarningSeconds: Int { min(max(0, idleWarningAfterSeconds ?? 90), activeMinutes * 60 - 5) }
     public var quietStart = 18
     public var quietEnd = 9
     public var browserEnabled = false

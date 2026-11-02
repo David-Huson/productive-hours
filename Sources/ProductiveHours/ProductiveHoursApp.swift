@@ -1,10 +1,17 @@
 import SwiftUI
 import AppKit
 import ActivityCore
+import UserNotifications
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     static weak var service: TrackingService?
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        UNUserNotificationCenter.current().delegate = self
+    }
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        [.banner, .sound]
+    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         Self.service?.shutdown(); return .terminateNow
     }
