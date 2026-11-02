@@ -290,8 +290,11 @@ struct HistoryView: View {
                         let rows = service.intervals.filter { $0.start < next.epochMS && $0.end > day.date.epochMS }
                         let groups = Dictionary(grouping: rows, by: { $0.source.host ?? $0.source.app })
                         ForEach(groups.keys.sorted(), id: \.self) { key in
-                            let seconds = groups[key, default: []].reduce(0.0) { $0 + Double(min($1.end, next.epochMS) - max($1.start, day.date.epochMS)) / 1000 }
-                            HStack { Text(key.isEmpty ? "Unknown source" : key); Spacer(); Text(Metrics.duration(seconds)) }.font(.caption)
+                            let rows = groups[key, default: []]
+                            let seconds = rows.reduce(0.0) { $0 + Double(min($1.end, next.epochMS) - max($1.start, day.date.epochMS)) / 1000 }
+                            let sample = rows.first
+                            let title = sample.map { service.activityLabel(app: $0.source.app, host: $0.source.host) } ?? (key.isEmpty ? "Unknown source" : key)
+                            HStack { Text(title); Spacer(); Text(Metrics.duration(seconds)) }.font(.caption)
                         }
                     } label: {
                         HStack { Text(Metrics.dayLabel(day.date, calendar: service.settings.calendar)); Spacer(); Text(Metrics.duration(day.productive)).monospacedDigit() }
@@ -355,32 +358,96 @@ private struct HistoryDayTooltip: View {
     }
 }
 
+private struct EditableRuleRow: View {
+    @ObservedObject var service: TrackingService
+    let rule: ClassificationRule
+    @State private var draft: ClassificationRule
+    @State private var displayNameText: String
+
+    init(service: TrackingService, rule: ClassificationRule) {
+        self.service = service
+        self.rule = rule
+        _draft = State(initialValue: rule)
+        _displayNameText = State(initialValue: rule.displayName ?? "")
+    }
+
+    private var draftChanged: Bool {
+        draft != rule || displayNameText.trimmingCharacters(in: .whitespacesAndNewlines) != (rule.displayName ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Display name", text: $displayNameText)
+            HStack(spacing: 8) {
+                Picker("Type", selection: $draft.kind) {
+                    ForEach(ClassificationRule.Kind.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }.frame(width: 130)
+                TextField(draft.kind == .app ? "Bundle ID" : "Hostname", text: $draft.pattern)
+                Picker("Class", selection: $draft.productivity) {
+                    ForEach(ProductivityClass.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }.frame(width: 140)
+                Stepper("Priority \(draft.priority)", value: $draft.priority, in: -100...100).frame(width: 130)
+            }
+            HStack {
+                Toggle("Enabled", isOn: $draft.enabled)
+                Spacer()
+                Text("v\(draft.version) · \(draft.pattern)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Button("Save") { commit() }.disabled(!draftChanged)
+                Button("Revert") { revert() }.disabled(!draftChanged)
+                Button("Remove", role: .destructive) { service.removeRule(rule.id) }
+            }
+        }
+        .padding(.vertical, 4)
+        .onChange(of: rule) { _, fresh in
+            guard !draftChanged else { return }
+            draft = fresh
+            displayNameText = fresh.displayName ?? ""
+        }
+    }
+
+    private func revert() {
+        draft = rule
+        displayNameText = rule.displayName ?? ""
+    }
+
+    private func commit() {
+        var updated = draft
+        let trimmed = displayNameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.displayName = trimmed.isEmpty ? nil : trimmed
+        service.updateRule(updated)
+        if let saved = service.rules.first(where: { $0.id == rule.id }) {
+            draft = saved
+            displayNameText = saved.displayName ?? ""
+        }
+    }
+}
+
 struct RulesView: View {
     @ObservedObject var service: TrackingService
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Rules apply forward by default. Exact host → scoped subdomain → domain → app → Undefined. Higher priority wins ties.").font(.callout)
+            Text("Display names are for your reference only; matching still uses the pattern.").font(.caption).foregroundStyle(.secondary)
             HStack {
-                Picker("Type", selection: $service.ruleKind) { ForEach(ClassificationRule.Kind.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.frame(width: 170)
+                TextField("Display name", text: $service.ruleDisplayName).frame(minWidth: 120)
+                Picker("Type", selection: $service.ruleKind) { ForEach(ClassificationRule.Kind.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.frame(width: 130)
                 TextField(service.ruleKind == .app ? "com.example.app" : "example.com", text: $service.rulePattern)
-                Picker("Class", selection: $service.ruleClass) { ForEach(ProductivityClass.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.frame(width: 180)
+                Picker("Class", selection: $service.ruleClass) { ForEach(ProductivityClass.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.frame(width: 150)
                 Stepper("Priority \(service.rulePriority)", value: $service.rulePriority, in: -100...100).frame(width: 130)
-                Button("Save rule") { service.addRule() }
+                Button("Add rule") { service.addRule() }
             }
             List {
                 Section("Rules") {
                     ForEach(service.rules) { rule in
-                        HStack {
-                            VStack(alignment: .leading) { Text(rule.pattern); Text("\(rule.kind.rawValue) · priority \(rule.priority) · version \(rule.version)").font(.caption).foregroundStyle(.secondary) }
-                            Spacer(); Text(rule.productivity.rawValue)
-                            Button("Remove") { service.removeRule(rule.id) }
-                        }
+                        EditableRuleRow(service: service, rule: rule)
                     }
                 }
                 Section("Rule change history") {
                     ForEach(service.ruleRevisions.prefix(30)) { revision in
                         DisclosureGroup("\(revision.date.formatted()) · \(revision.action)") {
-                            ForEach(revision.rules) { rule in Text("\(rule.pattern) → \(rule.productivity.rawValue) · v\(rule.version)").font(.caption) }
+                            ForEach(revision.rules) { rule in
+                                Text("\(rule.label) (\(rule.pattern)) → \(rule.productivity.rawValue) · v\(rule.version)").font(.caption)
+                            }
                         }
                     }
                 }
@@ -388,9 +455,16 @@ struct RulesView: View {
                     let grouped = Dictionary(grouping: service.intervals.filter { $0.source.productivity == .undefined && ($0.activity == .active || $0.activity == .passive) }, by: { $0.source.host ?? $0.source.app })
                     let sorted = grouped.keys.sorted { grouped[$0, default: []].reduce(0) { $0 + $1.seconds } > grouped[$1, default: []].reduce(0) { $0 + $1.seconds } }
                     ForEach(sorted.filter { !$0.isEmpty }, id: \.self) { key in
+                        let sample = grouped[key]?.first
                         HStack {
-                            Text(key); Spacer(); Text(Metrics.duration(grouped[key, default: []].reduce(0) { $0 + $1.seconds }))
-                            Button("Classify") { service.rulePattern = key; service.ruleKind = grouped[key]?.first?.source.host == nil ? .app : .exactHost }
+                            Text(key)
+                            Spacer()
+                            Text(Metrics.duration(grouped[key, default: []].reduce(0) { $0 + $1.seconds }))
+                            Button("Classify") {
+                                service.rulePattern = key
+                                service.ruleKind = sample?.source.host == nil ? .app : .exactHost
+                                service.ruleDisplayName = ""
+                            }
                         }
                     }
                 }

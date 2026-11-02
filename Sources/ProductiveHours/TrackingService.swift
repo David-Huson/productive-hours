@@ -33,6 +33,7 @@ final class TrackingService: ObservableObject {
     @Published var meetingEnd: Date?
     @Published var ruleKind: ClassificationRule.Kind = .app
     @Published var rulePattern = ""
+    @Published var ruleDisplayName = ""
     @Published var ruleClass: ProductivityClass = .productive
     @Published var rulePriority = 0
     @Published var preview: String?
@@ -288,20 +289,83 @@ final class TrackingService: ObservableObject {
         do { try store?.save("settings", value: settings); error = nil; refresh(); if wasRunning { start() } }
         catch { fail(error) }
     }
-    func addRule() {
-        let trimmed = rulePattern.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.count <= 253 else { message = "Enter an app bundle ID or hostname."; return }
-        let pattern: String
-        if ruleKind == .app {
-            guard trimmed.contains("."), trimmed.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 46 }) else { message = "Enter an exact app bundle ID, such as com.apple.Terminal."; return }
-            pattern = trimmed
+    func activityLabel(app: String, host: String?) -> String {
+        let resolved = RuleEvaluator.resolve(app: app, host: host, rules: rules)
+        if let ruleID = resolved.ruleID, let rule = rules.first(where: { $0.id == ruleID }) { return rule.label }
+        if let host, !host.isEmpty { return host }
+        return app.isEmpty ? "Unknown source" : app
+    }
+    func normalizedRulePattern(kind: ClassificationRule.Kind, raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 253 else {
+            message = "Enter an app bundle ID or hostname."
+            return nil
         }
-        else { guard let normalized = RuleEvaluator.hostname(trimmed) else { message = "Enter a hostname only, without scheme, path or wildcard."; return }; pattern = normalized }
+        if kind == .app {
+            guard trimmed.contains("."), trimmed.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 46 }) else {
+                message = "Enter an exact app bundle ID, such as com.apple.Terminal."
+                return nil
+            }
+            return trimmed
+        }
+        guard let normalized = RuleEvaluator.hostname(trimmed) else {
+            message = "Enter a hostname only, without scheme, path or wildcard."
+            return nil
+        }
+        return normalized
+    }
+    private func normalizedDisplayName(_ raw: String?) -> String? {
+        let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+        guard trimmed.count <= 80 else {
+            message = "Display name must be 80 characters or fewer."
+            return nil
+        }
+        return trimmed
+    }
+    func addRule() {
+        guard let pattern = normalizedRulePattern(kind: ruleKind, raw: rulePattern) else { return }
+        guard normalizedDisplayName(ruleDisplayName.isEmpty ? nil : ruleDisplayName) != nil
+            || ruleDisplayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let displayName = normalizedDisplayName(ruleDisplayName.isEmpty ? nil : ruleDisplayName)
         var new = rules
         if let index = new.firstIndex(where: { $0.kind == ruleKind && $0.pattern == pattern }) {
-            new[index].productivity = ruleClass; new[index].priority = rulePriority; new[index].version += 1; new[index].enabled = true
-        } else { new.append(ClassificationRule(kind: ruleKind, pattern: pattern, productivity: ruleClass, priority: rulePriority)) }
-        saveRules(new); rulePattern = ""
+            new[index].productivity = ruleClass
+            new[index].priority = rulePriority
+            new[index].enabled = true
+            if let displayName { new[index].displayName = displayName }
+            new[index].version += 1
+        } else {
+            new.append(ClassificationRule(kind: ruleKind, pattern: pattern, productivity: ruleClass, priority: rulePriority, displayName: displayName))
+        }
+        saveRules(new)
+        rulePattern = ""
+        ruleDisplayName = ""
+    }
+    func updateRule(_ updated: ClassificationRule) {
+        guard rules.contains(where: { $0.id == updated.id }) else { return }
+        guard let pattern = normalizedRulePattern(kind: updated.kind, raw: updated.pattern) else { return }
+        guard normalizedDisplayName(updated.displayName) != nil
+            || (updated.displayName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) else { return }
+        let displayName = normalizedDisplayName(updated.displayName)
+        if rules.contains(where: { $0.id != updated.id && $0.kind == updated.kind && $0.pattern == pattern }) {
+            message = "Another rule already uses this type and pattern."
+            return
+        }
+        var new = rules
+        guard let index = new.firstIndex(where: { $0.id == updated.id }) else { return }
+        var rule = new[index]
+        let matchingChanged = rule.kind != updated.kind || rule.pattern != pattern
+            || rule.productivity != updated.productivity || rule.priority != updated.priority || rule.enabled != updated.enabled
+        rule.kind = updated.kind
+        rule.pattern = pattern
+        rule.displayName = displayName
+        rule.productivity = updated.productivity
+        rule.priority = updated.priority
+        rule.enabled = updated.enabled
+        if matchingChanged { rule.version += 1 }
+        new[index] = rule
+        saveRules(new)
     }
     func removeRule(_ id: String) { saveRules(rules.filter { $0.id != id }) }
     func saveRules(_ new: [ClassificationRule]) {

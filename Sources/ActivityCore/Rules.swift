@@ -9,8 +9,15 @@ public struct ClassificationRule: Codable, Identifiable, Equatable, Sendable {
     public var priority: Int = 0
     public var enabled = true
     public var version = 1
-    public init(kind: Kind, pattern: String, productivity: ProductivityClass, priority: Int = 0) {
+    /// Optional friendly label; matching still uses `pattern` only.
+    public var displayName: String?
+    public var label: String {
+        let trimmed = displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? pattern : trimmed
+    }
+    public init(kind: Kind, pattern: String, productivity: ProductivityClass, priority: Int = 0, displayName: String? = nil) {
         self.kind = kind; self.pattern = pattern; self.productivity = productivity; self.priority = priority
+        self.displayName = displayName
     }
 }
 
