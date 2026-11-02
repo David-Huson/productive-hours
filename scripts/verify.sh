@@ -14,6 +14,6 @@ for scenario in committed uncommitted; do
     test "$result" -eq 77
     "$fixture_bin" verify "$fixture_dir/$scenario.sqlite"
 done
-PRODUCTIVE_HOURS_APP_DIR="$PWD/.build/verification/Productive Hours.app" ./scripts/build-app.sh
-plutil -lint '.build/verification/Productive Hours.app/Contents/Info.plist'
-codesign --verify --strict '.build/verification/Productive Hours.app'
+PRODUCTIVE_HOURS_APP_DIR="$PWD/.build/verification/Worktempo.app" ./scripts/build-app.sh
+plutil -lint '.build/verification/Worktempo.app/Contents/Info.plist'
+codesign --verify --strict '.build/verification/Worktempo.app'

@@ -1,4 +1,4 @@
-# Productive Hours
+# Worktempo
 
 Native macOS menu-bar app for estimated productive digital time. Swift 6, SwiftUI, public AppKit/Quartz observers, and local SQLite. macOS 14+; no third-party runtime dependencies.
 
@@ -6,7 +6,7 @@ Native macOS menu-bar app for estimated productive digital time. Swift 6, SwiftU
 
 ```sh
 ./scripts/verify.sh
-open '.build/verification/Productive Hours.app'
+open '.build/verification/Worktempo.app'
 ```
 
 The built app starts with tracking disabled on first launch. Open the dashboard, review Settings and enable tracking. Classify observed apps from the Undefined queue. Unknown apps and browser domains do not count as productive automatically.
@@ -65,3 +65,7 @@ Signing credentials are not bundled. No notarization submission has been made. D
 While tracking runs, Zoom or Discord audio input or output activity counts as productive time, including muted calls and listening without typing. The app reads audio-usage flags, not audio content. Call time appears in the existing active/passive totals, counted once, attributed to the call app. The menu shows “Work call counted” when applicable.
 
 Pause, observed sleep/lock, ignored apps and known private windows block credit. Call evidence expires after ten seconds without a refresh. Call detection is an audio-activity heuristic and can include app audio outside a call. Other meeting apps still require the separate manual timer.
+
+## App identity
+
+Worktempo is the new display name for Productive Hours. The bundle identifier, executable and existing `ProductiveHours` data folder intentionally stay unchanged, preserving settings, local history and launch-at-login identity. `Resources/Worktempo.png` is the original logo artwork. `scripts/build-icon.sh` generates all standard macOS icon sizes into the build directory; app packaging includes the resulting ICNS.

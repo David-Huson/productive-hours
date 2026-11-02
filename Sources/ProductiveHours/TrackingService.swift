@@ -402,7 +402,7 @@ final class TrackingService: ObservableObject {
         do { try store?.save("forecastAlert", value: forecastAlert) } catch { message = "Could not save forecast alert state." }
         guard NotificationPolicy.canDeliver(now: now, settings: settings, lastSent: nil, snoozedUntil: snoozedUntil) else { return }
         var type: String?, body = ""
-        if error != nil { type = "collection_stopped"; body = "Collection stopped. Open Productive Hours to review the data gap." }
+        if error != nil { type = "collection_stopped"; body = "Collection stopped. Open Worktempo to review the data gap." }
         else if menuTitle == "Limited coverage" { type = "coverage_degraded"; body = "Browser coverage is limited. Review browser access and classifications." }
         else if week.productive >= week.maximum { type = "maximum_reached"; body = "Your estimated productive time reached the weekly maximum." }
         else if week.productive >= week.minimum { type = "minimum_reached"; body = "Your estimated productive time reached the weekly minimum." }
@@ -413,7 +413,7 @@ final class TrackingService: ObservableObject {
         notificationDates = notificationDates.filter { now.timeIntervalSince($0.value) < 32 * 86400 }
         notificationDates[key] = now
         do { try store?.save("notificationDates", value: notificationDates) } catch { message = "Could not save notification cooldown."; return }
-        let content = UNMutableNotificationContent(); content.title = "Productive Hours · Estimate"; content.body = body
+        let content = UNMutableNotificationContent(); content.title = "Worktempo · Estimate"; content.body = body
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: key, content: content, trigger: nil))
     }
     private func evaluateIdleWarning(idleMS: Int64?, now: Date) {
@@ -424,7 +424,7 @@ final class TrackingService: ObservableObject {
             eligible: running && error == nil && engine.state == .active && !engine.isCallCrediting && engine.barriers.isEmpty && allowed) else { return }
         let remaining = max(1, settings.activeMinutes * 60 - Int((idleMS ?? 0) / 1000))
         let content = UNMutableNotificationContent()
-        content.title = "Productive Hours · Inactivity warning"
+        content.title = "Worktempo · Inactivity warning"
         content.body = "No input for \(Int((idleMS ?? 0) / 1000)) seconds. Passive time starts in about \(remaining) seconds. If you’re still working, mouse or keyboard activity resets the idle timer."
         content.sound = .default
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "inactivity_warning", content: content, trigger: nil))

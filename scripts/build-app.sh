@@ -3,19 +3,23 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ./scripts/swift-local.sh build --configuration "${BUILD_CONFIGURATION:-debug}" --product ProductiveHours
 bin_dir="$(./scripts/swift-local.sh build --configuration "${BUILD_CONFIGURATION:-debug}" --show-bin-path)"
-app_dir="${PRODUCTIVE_HOURS_APP_DIR:-$PWD/.build/Productive Hours.app}"
-mkdir -p "$app_dir/Contents/MacOS"
+app_dir="${PRODUCTIVE_HOURS_APP_DIR:-$PWD/.build/Worktempo.app}"
+mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
+./scripts/build-icon.sh
+cp .build/Worktempo.icns "$app_dir/Contents/Resources/Worktempo.icns"
 cp "$bin_dir/ProductiveHours" "$app_dir/Contents/MacOS/ProductiveHours"
 cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleIdentifier</key><string>local.productivehours.app</string>
-<key>CFBundleName</key><string>Productive Hours</string>
+<key>CFBundleName</key><string>Worktempo</string>
+<key>CFBundleDisplayName</key><string>Worktempo</string>
+<key>CFBundleIconFile</key><string>Worktempo</string>
 <key>CFBundleExecutable</key><string>ProductiveHours</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleVersion</key><string>3</string>
-<key>CFBundleShortVersionString</key><string>0.1.2</string>
+<key>CFBundleVersion</key><string>4</string>
+<key>CFBundleShortVersionString</key><string>0.1.3</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>
 <key>NSAppleEventsUsageDescription</key><string>With your permission, read the active Chrome, Edge or Arc tab hostname to classify productive time. Page content and full URLs are not stored.</string>

@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import Charts
 import Combine
 import ActivityCore
@@ -8,8 +9,11 @@ struct Dashboard: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
+                Image(nsImage: NSApplication.shared.applicationIconImage)
+                    .resizable().scaledToFit().frame(width: 56, height: 56)
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading) {
-                    Text("Productive Hours").font(.largeTitle.bold())
+                    Text("Worktempo").font(.largeTitle.bold())
                     Text("Your time, estimated locally").foregroundStyle(.secondary)
                 }
                 Spacer()

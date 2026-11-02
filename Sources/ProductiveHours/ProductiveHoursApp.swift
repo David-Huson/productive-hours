@@ -27,9 +27,9 @@ struct ProductiveHoursApp: App {
             PacePopover(service: service).onAppear { AppDelegate.service = service }
         } label: {
             Label(service.menuTitle, systemImage: service.menuSymbol)
-                .accessibilityLabel("Productive Hours: \(service.menuTitle)")
+                .accessibilityLabel("Worktempo: \(service.menuTitle)")
         }.menuBarExtraStyle(.window)
-        Window("Productive Hours", id: "dashboard") {
+        Window("Worktempo", id: "dashboard") {
             Dashboard(service: service).onAppear { AppDelegate.service = service }
         }.defaultSize(width: 1000, height: 720)
         Settings { SettingsView(service: service).frame(width: 720, height: 650) }
