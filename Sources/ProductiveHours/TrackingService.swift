@@ -1,0 +1,419 @@
+import Foundation
+import AppKit
+import Combine
+import UserNotifications
+import ServiceManagement
+import ActivityCore
+import PlatformCollectors
+import Persistence
+
+@MainActor
+final class TrackingService: ObservableObject {
+    @Published var settings = AppSettings()
+    @Published var editedSettings = AppSettings()
+    @Published var rules: [ClassificationRule] = []
+    @Published var ruleRevisions: [RuleRevision] = []
+    @Published var typeSnoozes: [String: Date] = [:]
+    @Published var intervals: [Interval] = []
+    @Published var totals: [DayTotal] = []
+    @Published var references: [ReferenceTotal] = []
+    @Published var manual: [ManualWork] = []
+    @Published var currentState: ActivityState = .unknown
+    @Published var currentApp = ""
+    @Published var status = "Paused"
+    @Published var stablePace = "Calibrating"
+    private var paceCandidate: (String, Date)?
+    @Published var browserStatus = "Browser tracking disabled"
+    @Published var callStatus = "No call observed"
+    @Published var error: String?
+    @Published var message: String?
+    @Published var lastUpdated = Date()
+    @Published var running = false
+    @Published var weekOffset = 0
+    @Published var meetingEnd: Date?
+    @Published var ruleKind: ClassificationRule.Kind = .app
+    @Published var rulePattern = ""
+    @Published var ruleClass: ProductivityClass = .productive
+    @Published var rulePriority = 0
+    @Published var preview: String?
+    @Published var referenceDate = Date()
+    @Published var referenceHours = 0.0
+    @Published var referenceTimezone = TimeZone.current.identifier
+    @Published var referenceMetric = "Productive"
+    @Published var snoozedUntil: Date?
+    @Published var confirmDelete = false
+    @Published var loginEnabled = false
+    private var store: Store?
+    private var engine = TrackingEngine(start: Date().epochMS)
+    private var pending: [Interval] = []
+    private let collector = PlatformCollector()
+    private let browser = BrowserObserver()
+    private var browserTask: Task<Void, Never>?
+    private var browserObservation: BrowserObservation?
+    private var lastBrowserRead = Date.distantPast
+    private var lastCommit = Date.distantPast
+    private var lastRetention = Date.distantPast
+    private var accepting = false
+    private var refreshTimer: Timer?
+    private var meetingStart: Date?
+    private var forecastAlert = ForecastAlertState()
+    private var archived: [ArchivedDay] = []
+    private var notificationDates: [String: Date] = [:]
+    private var pendingRules: [ClassificationRule]?
+    private var trace = DiagnosticTrace(fileURL: FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Application Support/ProductiveHours/Diagnostics/phase-0.json"))
+    static let directory = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Application Support/ProductiveHours")
+
+    init() {
+        AppDelegate.service = self
+        do {
+            let storage = try Store(url: Self.directory.appending(path: "activity.sqlite"))
+            store = storage
+            settings = try storage.load("settings", as: AppSettings.self) ?? AppSettings()
+            guard settings.valid else { throw StoreError.invalidData }
+            editedSettings = settings
+            rules = try storage.load("rules", as: [ClassificationRule].self) ?? []
+            notificationDates = try storage.load("notificationDates", as: [String: Date].self) ?? [:]
+            typeSnoozes = try storage.load("typeSnoozes", as: [String: Date].self) ?? [:]
+            snoozedUntil = try storage.load("snoozedUntil", as: Date.self)
+            forecastAlert = try storage.load("forecastAlert", as: ForecastAlertState.self) ?? ForecastAlertState()
+            if let checkpoint = try storage.load("checkpoint", as: TrackingEngine.self) {
+                engine = checkpoint
+                pending += engine.recover(at: Date().epochMS)
+                flush()
+            }
+            if let meeting = try storage.load("meetingCheckpoint", as: MeetingCheckpoint.self) {
+                if meeting.lastConfirmed > meeting.start { try storage.addManual(ManualWork(start: meeting.start, end: meeting.lastConfirmed, kind: "user_declared_meeting_recovered")) }
+                try storage.remove("meetingCheckpoint")
+            }
+            refresh()
+            loginEnabled = SMAppService.mainApp.status == .enabled
+            collector.onObservation = { [weak self] observation in self?.observe(observation) }
+            if settings.monitoringEnabled { start() }
+            refreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.periodic() }
+            }
+            if let refreshTimer { RunLoop.main.add(refreshTimer, forMode: .common) }
+        } catch { self.error = error.localizedDescription; status = "Storage unavailable" }
+    }
+
+    var week: WeeklyMetrics {
+        let now = Date()
+        let date = settings.calendar.date(byAdding: .weekOfYear, value: weekOffset, to: now)!
+        return Metrics.week(containing: date, now: now, totals: totals, settings: settings)
+    }
+    var liveWeek: WeeklyMetrics { Metrics.week(containing: Date(), now: Date(), totals: totals, settings: settings) }
+    var menuTitle: String {
+        if error != nil { return "Data gap" }
+        if !running { return "Paused" }
+        if !engine.isCallCrediting && BrowserObserver.browsers.contains(currentApp) && browserObservation?.host == nil { return "Limited coverage" }
+        if currentState == .unknown { return "Data gap" }
+        return stablePace
+    }
+    var menuSymbol: String {
+        if !running { return "pause.circle" }
+        switch menuTitle {
+        case "On track", "Target met", "Minimum met": return "checkmark.circle"
+        case "Behind pace": return "arrow.down.right.circle"
+        case "Above pace", "Above target": return "arrow.up.right.circle"
+        case "Calibrating": return "clock"
+        default: return "exclamationmark.circle"
+        }
+    }
+    var isCallCrediting: Bool { running && error == nil && engine.isCallCrediting }
+    var advice: String {
+        if let error { return error }
+        if !running { return "Tracking is paused. Paused time is a gap in the estimate." }
+        if menuTitle == "Limited coverage" { return "Browser domain unavailable. Review browser access or set an explicit app rule." }
+        if liveWeek.projection == nil { return "Building history for a forecast. Actual totals are available in the dashboard." }
+        switch liveWeek.status {
+        case "Behind pace": return "Review classifications and plan the remaining scheduled work."
+        case "Above pace": return "You are projected above your target. Consider a suitable stopping point."
+        default: return "Your estimated productive time is on pace for the weekly target."
+        }
+    }
+    private func append(_ values: [Interval]) {
+        for value in values where value.end > value.start {
+            if let previous = pending.last, previous.end == value.start, previous.source == value.source, previous.activity == value.activity, previous.reason == value.reason {
+                pending[pending.count - 1].end = value.end
+            } else { pending.append(value) }
+        }
+    }
+    private func apply(_ event: TrackingEvent, at time: Int64) { append(engine.apply(event, at: time)) }
+
+    func retryStorage() {
+        accepting = false; collector.stop(); running = false
+        do {
+            store = nil
+            let storage = try Store(url: Self.directory.appending(path: "activity.sqlite"))
+            store = storage
+            engine = try storage.load("checkpoint", as: TrackingEngine.self) ?? TrackingEngine(start: Date().epochMS)
+            guard Date().epochMS >= engine.boundary else { throw CSVError.invalid("Clock is earlier than the last durable interval. Resume after the clock catches up or correct the system clock.") }
+            pending = engine.recover(at: Date().epochMS)
+            error = nil; flush(); status = "Paused"
+        } catch { self.error = error.localizedDescription }
+    }
+    func start() {
+        guard store != nil, error == nil, !running else { return }
+        let now = Date().epochMS
+        guard now >= engine.boundary else { error = "Clock moved backward. Wait until the last recorded timestamp before resuming."; return }
+        engine.activeMS = Int64(settings.activeMinutes) * 60_000
+        engine.passiveMS = Int64(settings.passiveMinutes) * 60_000
+        apply(.pause(false), at: now)
+        browserObservation = nil; lastBrowserRead = .distantPast
+        running = true; accepting = true; settings.monitoringEnabled = true; settings.hasConsented = true
+        do { try store?.save("settings", value: settings) } catch { fail(error); return }
+        collector.start(); flush()
+    }
+    func pause() {
+        accepting = false; collector.stop(); browserTask?.cancel(); browserTask = nil; browserObservation = nil
+        apply(.pause(true), at: max(engine.boundary, Date().epochMS))
+        running = false; status = "Paused"; settings.monitoringEnabled = false
+        callStatus = "Call observation paused"
+        do { try store?.save("settings", value: settings) } catch { fail(error) }
+        endMeeting(); flush()
+    }
+    func shutdown() { guard settings.hasConsented || meetingStart != nil else { return }; accepting = false; collector.stop(); apply(.failure, at: max(engine.boundary, Date().epochMS)); endMeeting(); flush() }
+    private func fail(_ failure: Error) {
+        error = failure.localizedDescription; accepting = false; running = false; collector.stop(); status = "Data gap"
+    }
+    private func observe(_ observation: DiagnosticObservation) {
+        guard accepting else { return }
+        let now = observation.timestamp.epochMS
+        guard now >= engine.boundary else {
+            apply(.failure, at: engine.boundary); flush()
+            error = "Clock moved backward. Tracking stopped to prevent overlapping time."; accepting = false; running = false; collector.stop(); return
+        }
+        do { try trace.record(observation) } catch { message = "Diagnostic log unavailable; accounting storage remains active." }
+        if observation.health == .clockAnomaly || observation.health == .collectionGap {
+            apply(.failure, at: engine.boundary)
+        }
+        if let age = observation.idleMilliseconds, age >= 0 {
+            let inputAt = now - age
+            if inputAt > engine.boundary && (engine.lastInput == nil || inputAt > engine.lastInput! + 500) { apply(.input, at: inputAt) }
+        }
+        apply(.tick, at: now)
+        let barriers: [String: (String, Bool)] = ["sleep": ("sleep", true), "wake": ("sleep", false), "display_sleep": ("display", true), "display_wake": ("display", false), "session_inactive": ("session", true), "session_active": ("session", false)]
+        if let (name, entering) = barriers[observation.event] { apply(.barrier(name, entering), at: now) }
+        let app = observation.bundleID ?? ""
+        if app != currentApp { browserObservation = nil }
+        currentApp = app
+        let freshHost = browserObservation.flatMap { value in value.app == app && observation.timestamp.timeIntervalSince(value.observedAt) <= 10 ? value.host : nil }
+        var source = RuleEvaluator.resolve(app: app, host: freshHost, rules: rules)
+        if browserObservation?.status == "Private browsing excluded" && browserObservation?.app == app { source.productivity = .ignored; source.ruleID = nil; source.privateBrowsing = true }
+        apply(.foreground(source), at: now)
+        if let idle = observation.idleMilliseconds, !app.isEmpty {
+            apply(.observedIdle(idle), at: now)
+            apply(.recovered, at: now)
+        } else { apply(.failure, at: now) }
+        do {
+            let callSource = CallAudioProbe.productiveSource(try CallAudioProbe.sample(), rules: rules)
+            apply(.call(callSource), at: now)
+            callStatus = callSource.map { "\($0.app == "us.zoom.xos" ? "Zoom" : "Discord") audio active · counted once as productive while tracking is active and no exclusion applies" } ?? "No call audio active"
+        } catch {
+            apply(.call(nil), at: now)
+            callStatus = "Call observation unavailable · using normal activity rules"
+        }
+        currentState = engine.state
+        status = engine.state.rawValue.capitalized
+        if observation.event != "sample" || Date().timeIntervalSince(lastCommit) >= 30 { flush() }
+        if settings.browserEnabled && BrowserObserver.browsers.contains(app) && browserTask == nil && Date().timeIntervalSince(lastBrowserRead) >= 5 {
+            lastBrowserRead = Date()
+            browserTask = Task { [weak self, browser] in
+                let value = await browser.observe(app: app)
+                guard let self else { return }
+                self.browserTask = nil
+                guard !Task.isCancelled, self.running, self.settings.browserEnabled, self.currentApp == value.app else { return }
+                self.browserObservation = value; self.browserStatus = value.status
+                // Domain events are observations, never input. Reconcile foreground at event delivery.
+                self.collector.sample(event: "domain_changed")
+            }
+        }
+    }
+    private func periodic() {
+        if !running && error == nil && settings.hasConsented { apply(.tick, at: max(engine.boundary, Date().epochMS)); flush() }
+        if let end = meetingEnd, Date() >= end { endMeeting() }
+        if let start = meetingStart, let end = meetingEnd {
+            do { try store?.save("meetingCheckpoint", value: MeetingCheckpoint(start: start, lastConfirmed: min(Date(), end))) }
+            catch { message = "Meeting checkpoint could not be saved." }
+        }
+        evaluateNotifications()
+    }
+    private func flush() {
+        guard let store else { return }
+        do {
+            try store.commit(pending, checkpoint: engine)
+            pending.removeAll(); lastCommit = Date(); lastUpdated = Date()
+            if Date().timeIntervalSince(lastRetention) >= 86400 { try store.retain(settings: settings, now: Date()); lastRetention = Date() }
+            refresh()
+        } catch { fail(error) }
+    }
+    private func refresh() {
+        guard let store else { return }
+        do {
+            intervals = try store.intervals(); ruleRevisions = try store.ruleRevisions(); references = try store.references(); manual = try store.manualWork(); archived = try store.archives()
+            var grouped = Dictionary(uniqueKeysWithValues: Metrics.aggregate(intervals, settings: settings).map { ($0.id, $0) })
+            for archive in archived where archive.timezone == settings.timezone {
+                var value = archive.total
+                if archive.configuration.workdays != settings.workdays || archive.configuration.startHour != settings.startHour || archive.configuration.endHour != settings.endHour {
+                    value.scheduledEligible = 0; value.scheduledProductive = 0; value.scheduledUnknown = 0
+                }
+                if var existing = grouped[value.id] {
+                    existing.active += value.active; existing.passive += value.passive; existing.unproductive += value.unproductive
+                    existing.undefined += value.undefined; existing.ignored += value.ignored; existing.inactive += value.inactive; existing.unknown += value.unknown
+                    existing.scheduledEligible += value.scheduledEligible; existing.scheduledProductive += value.scheduledProductive; existing.scheduledUnknown += value.scheduledUnknown
+                    grouped[value.id] = existing
+                } else { grouped[value.id] = value }
+            }
+            totals = grouped.values.sorted { $0.date < $1.date }
+            let next = liveWeek.status
+            if next == stablePace { paceCandidate = nil }
+            else if ["Calibrating", "Minimum met", "Target met", "Above target", "Below target"].contains(next) || stablePace == "Calibrating" {
+                stablePace = next; paceCandidate = nil
+            } else if paceCandidate?.0 != next { paceCandidate = (next, Date()) }
+            else if let candidate = paceCandidate, Date().timeIntervalSince(candidate.1) >= 300 { stablePace = next; paceCandidate = nil }
+        } catch { fail(error) }
+    }
+    func saveSettings() {
+        guard editedSettings.valid else { message = "Check timezone, target range, schedule, thresholds and retention."; return }
+        let wasRunning = running
+        if wasRunning { pause() }
+        settings = editedSettings; settings.monitoringEnabled = wasRunning
+        browserStatus = settings.browserEnabled ? "Waiting for supported browser" : "Browser tracking disabled"
+        do { try store?.save("settings", value: settings); error = nil; refresh(); if wasRunning { start() } }
+        catch { fail(error) }
+    }
+    func addRule() {
+        let trimmed = rulePattern.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 253 else { message = "Enter an app bundle ID or hostname."; return }
+        let pattern: String
+        if ruleKind == .app {
+            guard trimmed.contains("."), trimmed.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 46 }) else { message = "Enter an exact app bundle ID, such as com.apple.Terminal."; return }
+            pattern = trimmed
+        }
+        else { guard let normalized = RuleEvaluator.hostname(trimmed) else { message = "Enter a hostname only, without scheme, path or wildcard."; return }; pattern = normalized }
+        var new = rules
+        if let index = new.firstIndex(where: { $0.kind == ruleKind && $0.pattern == pattern }) {
+            new[index].productivity = ruleClass; new[index].priority = rulePriority; new[index].version += 1; new[index].enabled = true
+        } else { new.append(ClassificationRule(kind: ruleKind, pattern: pattern, productivity: ruleClass, priority: rulePriority)) }
+        saveRules(new); rulePattern = ""
+    }
+    func removeRule(_ id: String) { saveRules(rules.filter { $0.id != id }) }
+    func saveRules(_ new: [ClassificationRule]) {
+        apply(.tick, at: max(engine.boundary, Date().epochMS)); flush()
+        do { try store?.saveRuleSet(new); rules = new; ruleRevisions = try store?.ruleRevisions() ?? []; if accepting { collector.sample(event: "rules_changed") }; message = "Rules saved for future activity. Use Preview to recalculate retained history." }
+        catch { fail(error) }
+    }
+    func previewReclassification() {
+        let before = intervals.filter(\.productive).reduce(0) { $0 + $1.seconds }
+        let after = intervals.reduce(0.0) { sum, interval in
+            if interval.source.privateBrowsing { return sum }
+            if interval.reason == "call_audio" { return sum + (interval.productive ? interval.seconds : 0) }
+            let source = RuleEvaluator.resolve(app: interval.source.app, host: interval.source.host, rules: rules)
+            return sum + (ActivityClassification(productivity: source.productivity, activity: interval.activity).creditsProductiveTime ? interval.seconds : 0)
+        }
+        pendingRules = rules
+        preview = "Retained productive time: \(Metrics.duration(before)) → \(Metrics.duration(after)). Archived summaries cannot be recalculated. This change can be undone."
+    }
+    func applyReclassification() {
+        guard let selected = pendingRules else { return }
+        do { try store?.reclassify(rules: selected, previousRules: rules, at: Date()); preview = nil; pendingRules = nil; refresh() }
+        catch { fail(error) }
+    }
+    func undoReclassification() {
+        do { if let previous = try store?.undoReclassification() { rules = previous; refresh(); message = "Last retained-history recalculation undone." } }
+        catch { fail(error) }
+    }
+    func beginMeeting(minutes: Int) {
+        endMeeting(); let start = Date()
+        do {
+            try store?.save("meetingCheckpoint", value: MeetingCheckpoint(start: start, lastConfirmed: start))
+            meetingStart = start; meetingEnd = start.addingTimeInterval(Double(minutes * 60))
+            message = "Work meeting started. User-declared time stays separate from the automatic estimate."
+        } catch { fail(error) }
+    }
+    func endMeeting() {
+        guard let start = meetingStart, let plannedEnd = meetingEnd else { return }
+        let end = min(Date(), plannedEnd); meetingStart = nil; meetingEnd = nil
+        do { if end > start { try store?.addManual(ManualWork(start: start, end: end)) }; try store?.remove("meetingCheckpoint"); refresh() } catch { fail(error) }
+    }
+    func saveReference() {
+        guard referenceHours.isFinite, referenceHours >= 0, referenceHours <= 25, TimeZone(identifier: referenceTimezone) != nil, !referenceMetric.isEmpty else { message = "Enter valid reference hours, timezone and metric."; return }
+        var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(identifier: referenceTimezone)!
+        let key = Metrics.dayKey(referenceDate, calendar: calendar)
+        let previous = references.filter { $0.day == key && $0.timezone == referenceTimezone && $0.metric == referenceMetric }.max { $0.importedAt < $1.importedAt }
+        do { try store?.addReference(ReferenceTotal(day: key, timezone: referenceTimezone, metric: referenceMetric, seconds: referenceHours * 3600, source: "manual", correctsID: previous?.id)); refresh() } catch { fail(error) }
+    }
+    func importCSV() {
+        let panel = NSOpenPanel(); panel.allowedContentTypes = [.commaSeparatedText, .plainText]; panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            guard (try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) <= 2_000_000 else { throw CSVError.invalid("CSV exceeds 2 MB.") }
+            var values = try CalibrationCSV.parse(String(contentsOf: url, encoding: .utf8), timezone: referenceTimezone, metric: referenceMetric)
+            for index in values.indices {
+                values[index].correctsID = references.filter { $0.day == values[index].day && $0.timezone == referenceTimezone && $0.metric == referenceMetric }.max { $0.importedAt < $1.importedAt }?.id
+            }
+            try store?.importReferences(values); refresh(); message = "Imported \(values.count) daily reference totals."
+        } catch { message = error.localizedDescription }
+    }
+    func exportCSV() {
+        let panel = NSSavePanel(); panel.nameFieldStringValue = "productive-hours-summary.csv"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let csv = "date,timezone,productive_active_seconds,productive_passive_seconds,unknown_seconds\n" + totals.map { "\($0.id),\(settings.timezone),\(Int($0.active)),\(Int($0.passive)),\(Int($0.unknown))" }.joined(separator: "\n")
+        do { try csv.write(to: url, atomically: true, encoding: .utf8); message = "Aggregated statistics exported." } catch { message = error.localizedDescription }
+    }
+    func deleteAll() {
+        pause()
+        do {
+            try store?.deleteAll()
+            let diagnostics = Self.directory.appending(path: "Diagnostics")
+            if FileManager.default.fileExists(atPath: diagnostics.path) { try FileManager.default.removeItem(at: diagnostics) }
+            settings = AppSettings(); editedSettings = settings; rules = []; engine = TrackingEngine(start: Date().epochMS); pending = []; notificationDates = [:]; snoozedUntil = nil
+            trace = DiagnosticTrace(fileURL: Self.directory.appending(path: "Diagnostics/phase-0.json")); typeSnoozes = [:]; forecastAlert = ForecastAlertState()
+            error = nil; message = "Local activity, rules, references, settings and diagnostic data deleted."; refresh(); confirmDelete = false
+            UNUserNotificationCenter.current().removeAllPendingNotificationRequests(); UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+        } catch { fail(error) }
+    }
+    func setLogin(_ enabled: Bool) {
+        do { if enabled { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }; loginEnabled = enabled }
+        catch { message = "Launch at login could not be changed: \(error.localizedDescription)" }
+    }
+    func enableNotifications() {
+        Task {
+            do {
+                let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
+                editedSettings.notifications = granted; settings.notifications = granted
+                try store?.save("settings", value: settings)
+                if !granted { message = "Notifications are disabled. Tracking still works." }
+            } catch { message = "Notification authorization unavailable. Tracking still works." }
+        }
+    }
+    func snooze() { snoozedUntil = settings.calendar.date(byAdding: .day, value: 1, to: Date()); try? store?.save("snoozedUntil", value: snoozedUntil) }
+    func snooze(type: String) {
+        typeSnoozes[type] = Date().addingTimeInterval(86400)
+        do { try store?.save("typeSnoozes", value: typeSnoozes); message = "This alert type is snoozed for 24 hours." }
+        catch { message = "Could not save alert snooze." }
+    }
+    private func evaluateNotifications() {
+        let now = Date()
+        let week = liveWeek
+        let forecast = forecastAlert.evaluate(projection: week.projection, minimum: week.minimum, maximum: week.maximum, now: now)
+        do { try store?.save("forecastAlert", value: forecastAlert) } catch { message = "Could not save forecast alert state." }
+        guard NotificationPolicy.canDeliver(now: now, settings: settings, lastSent: nil, snoozedUntil: snoozedUntil) else { return }
+        var type: String?, body = ""
+        if error != nil { type = "collection_stopped"; body = "Collection stopped. Open Productive Hours to review the data gap." }
+        else if menuTitle == "Limited coverage" { type = "coverage_degraded"; body = "Browser coverage is limited. Review browser access and classifications." }
+        else if week.productive >= week.maximum { type = "maximum_reached"; body = "Your estimated productive time reached the weekly maximum." }
+        else if week.productive >= week.minimum { type = "minimum_reached"; body = "Your estimated productive time reached the weekly minimum." }
+        else if let forecast, settings.calendar.component(.hour, from: now) >= settings.endHour { type = forecast; body = advice }
+        guard let type else { return }
+        let key = type + ":" + Metrics.dayKey(now, calendar: settings.calendar)
+        guard NotificationPolicy.canDeliver(now: now, settings: settings, lastSent: notificationDates[key], snoozedUntil: max(snoozedUntil ?? .distantPast, typeSnoozes[type] ?? .distantPast)) else { return }
+        notificationDates = notificationDates.filter { now.timeIntervalSince($0.value) < 32 * 86400 }
+        notificationDates[key] = now
+        do { try store?.save("notificationDates", value: notificationDates) } catch { message = "Could not save notification cooldown."; return }
+        let content = UNMutableNotificationContent(); content.title = "Productive Hours · Estimate"; content.body = body
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: key, content: content, trigger: nil))
+    }
+}
+
+private struct MeetingCheckpoint: Codable { var start: Date; var lastConfirmed: Date }

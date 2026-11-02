@@ -1,0 +1,29 @@
+.build/
+.swiftpm/
+.DS_Store
+dist/
+
+# Local activity, diagnostics, and exports
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.log
+*.csv
+Diagnostics/
+exports/
+*.profraw
+*.profdata
+
+# Local configuration and signing credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+
+# Device-specific validation notes, retained locally
+docs/phase-0-validation.md
+docs/implementation-status.md
