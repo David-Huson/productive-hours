@@ -26,14 +26,26 @@ struct ProductiveHoursApp: App {
         MenuBarExtra {
             PacePopover(service: service).onAppear { AppDelegate.service = service }
         } label: {
-            Label(service.menuTitle, systemImage: service.menuSymbol)
-                .accessibilityLabel("Worktempo: \(service.menuTitle)")
+            Image(nsImage: service.menuBarIcon)
+                .accessibilityLabel(menuBarAccessibilityLabel(for: service.menuBarActivityIndicator, title: service.menuTitle))
         }.menuBarExtraStyle(.window)
         Window("Worktempo", id: "dashboard") {
             Dashboard(service: service).onAppear { AppDelegate.service = service }
         }.defaultSize(width: 1000, height: 720)
         Settings { SettingsView(service: service).frame(width: 720, height: 650) }
     }
+}
+
+private func menuBarAccessibilityLabel(for indicator: MenuBarActivityIndicator, title: String) -> String {
+    let state: String
+    switch indicator {
+    case .active: state = "Active"
+    case .passive: state = "Passive"
+    case .inactive: state = "Inactive"
+    case .unproductive: state = "Unproductive"
+    case .hidden: state = title
+    }
+    return "Worktempo: \(state)"
 }
 
 struct PacePopover: View {

@@ -543,7 +543,8 @@ struct CalibrationView: View {
 struct SettingsView: View {
     @ObservedObject var service: TrackingService
     var body: some View {
-        Form {
+        ZStack(alignment: .bottom) {
+            Form {
             Section("Weekly target and schedule") {
                 TextField("IANA timezone", text: $service.editedSettings.timezone)
                 Picker("Week starts", selection: $service.editedSettings.weekStart) {
@@ -574,14 +575,24 @@ struct SettingsView: View {
             }
             Section("Notifications and startup") {
                 Toggle("Alerts enabled", isOn: $service.editedSettings.notifications)
-                Stepper("Warn after \(service.editedSettings.effectiveIdleWarningSeconds) seconds without input", value: Binding(
-                    get: { service.editedSettings.effectiveIdleWarningSeconds },
-                    set: { service.editedSettings.idleWarningAfterSeconds = $0 }),
-                    in: 0...(service.editedSettings.activeMinutes * 60 - 5), step: 5)
-                Text("0 disables inactivity warnings. Warns once before passive time begins; resets after input. Respects quiet hours and snoozes. No warning during detected work calls.").font(.caption)
+                Stepper("Warn \(service.editedSettings.effectiveWarnBeforePassiveSeconds) seconds before passive", value: Binding(
+                    get: { service.editedSettings.effectiveWarnBeforePassiveSeconds },
+                    set: {
+                        service.editedSettings.warnBeforePassiveSeconds = $0
+                        service.editedSettings.idleWarningAfterSeconds = $0
+                    }),
+                    in: 0...(max(0, service.editedSettings.activeMinutes * 60 - 5)), step: 5)
+                Stepper("Warn \(service.editedSettings.effectiveWarnBeforeInactiveSeconds) seconds before inactive", value: Binding(
+                    get: { service.editedSettings.effectiveWarnBeforeInactiveSeconds },
+                    set: { service.editedSettings.warnBeforeInactiveSeconds = $0 }),
+                    in: 0...(max(0, service.editedSettings.passiveMinutes * 60 - 5)), step: 5)
+                Text("0 disables that advance warning. Each fires once per idle episode before the boundary, then resets after input. Respects quiet hours, snoozes, and skips during detected work calls.").font(.caption)
+                Toggle("Warn when going into passive", isOn: $service.editedSettings.warnWhenEnteringPassive)
+                Toggle("Warn when going into inactive", isOn: $service.editedSettings.warnWhenEnteringInactive)
+                Text("Activity alerts (before/at passive or inactive) ignore quiet hours. Weekly pace alerts still respect quiet hours. All require Alerts enabled, Save settings, and macOS notification permission via Authorize.").font(.caption)
                 HStack { Button("Authorize notifications…") { service.enableNotifications() }; Button("Snooze alerts for one day") { service.snooze() } }
                 Menu("Snooze a specific alert for 24 hours") {
-                    ForEach(["inactivity_warning", "behind_weekly_pace", "projected_over_maximum", "minimum_reached", "maximum_reached", "collection_stopped", "coverage_degraded"], id: \.self) { type in
+                    ForEach(["before_passive", "before_inactive", "inactivity_warning", "activity_passive", "activity_inactive", "behind_weekly_pace", "projected_over_maximum", "minimum_reached", "maximum_reached", "collection_stopped", "coverage_degraded"], id: \.self) { type in
                         Button(type.replacingOccurrences(of: "_", with: " ")) { service.snooze(type: type) }
                     }
                 }
@@ -589,7 +600,6 @@ struct SettingsView: View {
                 Stepper("Quiet hours end at \(service.editedSettings.quietEnd):00", value: $service.editedSettings.quietEnd, in: 0...23)
                 Toggle("Launch at login", isOn: Binding(get: { service.loginEnabled }, set: { service.setLogin($0) }))
             }
-            Button("Save settings") { service.saveSettings() }.buttonStyle(.borderedProminent)
             Section("Data control") {
                 Button("Export aggregated statistics…") { service.exportCSV() }
                 Button("Delete all local data…", role: .destructive) { service.confirmDelete = true }
@@ -598,6 +608,34 @@ struct SettingsView: View {
                     HStack { Button("Delete permanently", role: .destructive) { service.deleteAll() }; Button("Cancel") { service.confirmDelete = false } }
                 }
             }
-        }.formStyle(.grouped)
+            }
+            .formStyle(.grouped)
+            .padding(.bottom, service.hasUnsavedSettings ? 52 : 0)
+            if service.hasUnsavedSettings {
+                SettingsUnsavedChangesBar(service: service)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: service.hasUnsavedSettings)
+    }
+}
+
+private struct SettingsUnsavedChangesBar: View {
+    @ObservedObject var service: TrackingService
+    var body: some View {
+        HStack(spacing: 12) {
+            Text("Unsaved changes").font(.callout).foregroundStyle(.secondary)
+            Spacer()
+            Button("Revert") { service.discardSettingsEdits() }
+            Button("Save settings") { service.saveSettings() }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut("s", modifiers: .command)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity)
+        .background(.regularMaterial)
+        .overlay(alignment: .top) { Divider() }
+        .shadow(color: .black.opacity(0.12), radius: 8, y: -2)
     }
 }

@@ -7,6 +7,7 @@ app_dir="${PRODUCTIVE_HOURS_APP_DIR:-$PWD/.build/Worktempo.app}"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
 ./scripts/build-icon.sh
 cp .build/Worktempo.icns "$app_dir/Contents/Resources/Worktempo.icns"
+cp Resources/Worktempo.png "$app_dir/Contents/Resources/Worktempo.png"
 cp "$bin_dir/ProductiveHours" "$app_dir/Contents/MacOS/ProductiveHours"
 cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

@@ -100,7 +100,8 @@ public final class Store {
         }
     }
     public func load<T: Decodable>(_ key: String, as type: T.Type) throws -> T? {
-        try read("SELECT payload FROM values_store WHERE key=?", [.text(key)]).first
+        let rows: [T] = try read("SELECT payload FROM values_store WHERE key=?", [.text(key)])
+        return rows.first
     }
     public func save<T: Encodable>(_ key: String, value: T) throws {
         try execute("INSERT INTO values_store(key,payload) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload", [.text(key), .text(try json(value))])

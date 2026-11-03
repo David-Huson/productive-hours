@@ -29,6 +29,21 @@ func invalidCSVRejected(csv: String) {
     #expect(state.evaluate(projection: 30, minimum: 35, maximum: 40, now: now.addingTimeInterval(1802)) == nil)
     #expect(state.evaluate(projection: nil, minimum: 35, maximum: 40, now: now.addingTimeInterval(4000)) == nil)
 }
+@Test func activityAlertsIgnoreQuietHours() {
+    var settings = AppSettings()
+    settings.timezone = "America/New_York"
+    settings.notifications = true
+    settings.quietStart = 18
+    settings.quietEnd = 9
+    var components = DateComponents()
+    components.timeZone = TimeZone(identifier: settings.timezone)
+    components.year = 2026; components.month = 11; components.day = 2; components.hour = 20
+    let evening = Calendar.current.date(from: components)!
+    #expect(NotificationPolicy.isQuietHour(now: evening, settings: settings))
+    #expect(NotificationPolicy.canDeliverActivityAlert(now: evening, settings: settings, snoozedUntil: nil))
+    #expect(!NotificationPolicy.canDeliver(now: evening, settings: settings, lastSent: nil, snoozedUntil: nil))
+}
+
 @Test func alertsRespectQuietHoursCooldownAndSnooze() {
     var settings = AppSettings(); settings.timezone = "UTC"; settings.notifications = true
     let now = ISO8601DateFormatter().date(from: "2026-10-30T17:00:00Z")!
