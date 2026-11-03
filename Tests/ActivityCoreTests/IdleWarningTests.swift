@@ -75,15 +75,30 @@ import Testing
 
 @Test func legacySettingsDefaultWarningAndShorterActiveThreshold() throws {
     var settings = AppSettings()
-    #expect(settings.effectiveWarnBeforePassiveSeconds == 90)
+    #expect(settings.effectiveWarnBeforePassiveSeconds == 30)
     #expect(settings.effectiveWarnBeforeInactiveSeconds == 0)
     let data = try JSONEncoder().encode(settings)
-    #expect(try JSONDecoder().decode(AppSettings.self, from: data).effectiveWarnBeforePassiveSeconds == 90)
+    #expect(try JSONDecoder().decode(AppSettings.self, from: data).effectiveWarnBeforePassiveSeconds == 30)
     settings.activeMinutes = 1
-    #expect(settings.effectiveWarnBeforePassiveSeconds == 55)
+    #expect(settings.effectiveWarnBeforePassiveSeconds == 5)
     settings.idleWarningAfterSeconds = 0
     #expect(settings.effectiveWarnBeforePassiveSeconds == 0)
     settings.warnBeforeInactiveSeconds = 120
     settings.passiveMinutes = 5
     #expect(settings.effectiveWarnBeforeInactiveSeconds == 120)
+}
+
+@Test func preUpgradeSettingsDecodeWithoutNewAlertFields() throws {
+    var original = AppSettings()
+    original.minimumHours = 36
+    original.idleWarningAfterSeconds = 90
+    var json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any])
+    for key in ["warnBeforePassiveSeconds", "warnBeforeInactiveSeconds", "warnWhenEnteringPassive", "warnWhenEnteringInactive"] {
+        json.removeValue(forKey: key)
+    }
+    let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONSerialization.data(withJSONObject: json))
+    #expect(decoded.minimumHours == 36)
+    #expect(!decoded.warnWhenEnteringPassive)
+    #expect(!decoded.warnWhenEnteringInactive)
+    #expect(decoded.effectiveWarnBeforePassiveSeconds == 30)
 }

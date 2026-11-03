@@ -485,7 +485,7 @@ final class TrackingService: ObservableObject {
             let authorized = status.authorizationStatus == .authorized || status.authorizationStatus == .provisional
             Task { @MainActor in
                 guard let self else { return }
-                if self.settings.notifications != authorized {
+                if self.settings.notifications && !authorized {
                     self.settings.notifications = authorized
                     self.editedSettings.notifications = authorized
                     try? self.store?.save("settings", value: self.settings)

@@ -67,7 +67,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var retentionDays = 90
     public var notifications = false
     public var idleWarningAfterSeconds: Int?
-    /// Seconds before the active→passive boundary; nil inherits `idleWarningAfterSeconds` then 90.
+    /// Seconds before the active→passive boundary; nil converts the legacy after-idle delay to a lead time.
     public var warnBeforePassiveSeconds: Int?
     /// Seconds before the passive→inactive boundary; 0 disables.
     public var warnBeforeInactiveSeconds: Int?
@@ -75,7 +75,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var warnWhenEnteringInactive = false
     public var effectiveIdleWarningSeconds: Int { effectiveWarnBeforePassiveSeconds }
     public var effectiveWarnBeforePassiveSeconds: Int {
-        let raw = warnBeforePassiveSeconds ?? idleWarningAfterSeconds ?? 90
+        let legacyDelay = min(max(0, idleWarningAfterSeconds ?? 90), max(0, activeMinutes * 60 - 5))
+        let raw = warnBeforePassiveSeconds ?? (legacyDelay == 0 ? 0 : activeMinutes * 60 - legacyDelay)
         let cap = max(0, activeMinutes * 60 - 5)
         return min(max(0, raw), cap)
     }
@@ -90,6 +91,34 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var monitoringEnabled = false
     public var hasConsented = false
     public init() {}
+    private enum CodingKeys: String, CodingKey {
+        case timezone, weekStart, minimumHours, maximumHours, workdays, startHour, endHour, activeMinutes, passiveMinutes, retentionDays, notifications, idleWarningAfterSeconds, warnBeforePassiveSeconds, warnBeforeInactiveSeconds, warnWhenEnteringPassive, warnWhenEnteringInactive, quietStart, quietEnd, browserEnabled, monitoringEnabled, hasConsented
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        timezone = try values.decode(String.self, forKey: .timezone)
+        weekStart = try values.decode(Int.self, forKey: .weekStart)
+        minimumHours = try values.decode(Double.self, forKey: .minimumHours)
+        maximumHours = try values.decode(Double.self, forKey: .maximumHours)
+        workdays = try values.decode(Set<Int>.self, forKey: .workdays)
+        startHour = try values.decode(Int.self, forKey: .startHour)
+        endHour = try values.decode(Int.self, forKey: .endHour)
+        activeMinutes = try values.decode(Int.self, forKey: .activeMinutes)
+        passiveMinutes = try values.decode(Int.self, forKey: .passiveMinutes)
+        retentionDays = try values.decode(Int.self, forKey: .retentionDays)
+        notifications = try values.decode(Bool.self, forKey: .notifications)
+        idleWarningAfterSeconds = try values.decodeIfPresent(Int.self, forKey: .idleWarningAfterSeconds)
+        warnBeforePassiveSeconds = try values.decodeIfPresent(Int.self, forKey: .warnBeforePassiveSeconds)
+        warnBeforeInactiveSeconds = try values.decodeIfPresent(Int.self, forKey: .warnBeforeInactiveSeconds)
+        warnWhenEnteringPassive = try values.decodeIfPresent(Bool.self, forKey: .warnWhenEnteringPassive) ?? false
+        warnWhenEnteringInactive = try values.decodeIfPresent(Bool.self, forKey: .warnWhenEnteringInactive) ?? false
+        quietStart = try values.decode(Int.self, forKey: .quietStart)
+        quietEnd = try values.decode(Int.self, forKey: .quietEnd)
+        browserEnabled = try values.decode(Bool.self, forKey: .browserEnabled)
+        monitoringEnabled = try values.decode(Bool.self, forKey: .monitoringEnabled)
+        hasConsented = try values.decode(Bool.self, forKey: .hasConsented)
+    }
     public var valid: Bool {
         TimeZone(identifier: timezone) != nil && (1...7).contains(weekStart) && minimumHours > 0 && maximumHours >= minimumHours && maximumHours <= 168 && startHour >= 0 && endHour <= 24 && startHour < endHour && activeMinutes > 0 && activeMinutes <= 60 && passiveMinutes >= 0 && passiveMinutes <= 120 && retentionDays >= 1 && retentionDays <= 3650 && (0...23).contains(quietStart) && (0...23).contains(quietEnd) && workdays.isSubset(of: Set(1...7))
     }

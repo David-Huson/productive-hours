@@ -94,7 +94,18 @@ struct OverviewView: View {
                 HStack {
                     MetricCard(title: "Productive active", value: Metrics.duration(week.days.reduce(0) { $0 + $1.active }))
                     MetricCard(title: "Productive passive", value: Metrics.duration(week.days.reduce(0) { $0 + $1.passive }))
-                    MetricCard(title: "Tracking gaps", value: Metrics.duration(week.unknown), detail: "Unknown is not zero activity")
+                    MetricCard(title: "Untracked time", value: Metrics.duration(week.unknown), detail: "Paused or collection unavailable")
+                }
+                DisclosureGroup("Why time is untracked") {
+                    let gaps = TrackingGapSummary(intervals: service.intervals, start: week.start, end: week.end)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Tracking paused: \(Metrics.duration(gaps.paused))")
+                        Text("Collection unavailable: \(Metrics.duration(gaps.collection))")
+                        let other = gaps.other + max(0, week.unknown - gaps.total)
+                        if other > 0 { Text("Other / archived gaps: \(Metrics.duration(other))") }
+                        Text("Untracked time has no reliable activity measurement. It includes pauses and may include app restarts. It cannot be fixed with classification rules and is not counted as productive or unproductive. Totals cover the selected week, including outside your work schedule.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
                 }
                 GroupBox("Weekly pace") {
                     VStack(alignment: .leading, spacing: 8) {
@@ -358,40 +369,48 @@ private struct HistoryDayTooltip: View {
     }
 }
 
+@MainActor
+private final class RuleEditState: ObservableObject {
+    @Published var draft: ClassificationRule
+    @Published var displayNameText: String
+    init(_ rule: ClassificationRule) {
+        draft = rule
+        displayNameText = rule.displayName ?? ""
+    }
+}
+
 private struct EditableRuleRow: View {
     @ObservedObject var service: TrackingService
     let rule: ClassificationRule
-    @State private var draft: ClassificationRule
-    @State private var displayNameText: String
+    @StateObject private var edit: RuleEditState
 
     init(service: TrackingService, rule: ClassificationRule) {
         self.service = service
         self.rule = rule
-        _draft = State(initialValue: rule)
-        _displayNameText = State(initialValue: rule.displayName ?? "")
+        _edit = StateObject(wrappedValue: RuleEditState(rule))
     }
 
     private var draftChanged: Bool {
-        draft != rule || displayNameText.trimmingCharacters(in: .whitespacesAndNewlines) != (rule.displayName ?? "")
+        edit.draft != rule || edit.displayNameText.trimmingCharacters(in: .whitespacesAndNewlines) != (rule.displayName ?? "")
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            TextField("Display name", text: $displayNameText)
+            TextField("Display name", text: $edit.displayNameText)
             HStack(spacing: 8) {
-                Picker("Type", selection: $draft.kind) {
+                Picker("Type", selection: $edit.draft.kind) {
                     ForEach(ClassificationRule.Kind.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }.frame(width: 130)
-                TextField(draft.kind == .app ? "Bundle ID" : "Hostname", text: $draft.pattern)
-                Picker("Class", selection: $draft.productivity) {
+                TextField(edit.draft.kind == .app ? "Bundle ID" : "Hostname", text: $edit.draft.pattern)
+                Picker("Class", selection: $edit.draft.productivity) {
                     ForEach(ProductivityClass.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }.frame(width: 140)
-                Stepper("Priority \(draft.priority)", value: $draft.priority, in: -100...100).frame(width: 130)
+                Stepper("Priority \(edit.draft.priority)", value: $edit.draft.priority, in: -100...100).frame(width: 130)
             }
             HStack {
-                Toggle("Enabled", isOn: $draft.enabled)
+                Toggle("Enabled", isOn: $edit.draft.enabled)
                 Spacer()
-                Text("v\(draft.version) · \(draft.pattern)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text("v\(edit.draft.version) · \(edit.draft.pattern)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 Button("Save") { commit() }.disabled(!draftChanged)
                 Button("Revert") { revert() }.disabled(!draftChanged)
                 Button("Remove", role: .destructive) { service.removeRule(rule.id) }
@@ -400,24 +419,24 @@ private struct EditableRuleRow: View {
         .padding(.vertical, 4)
         .onChange(of: rule) { _, fresh in
             guard !draftChanged else { return }
-            draft = fresh
-            displayNameText = fresh.displayName ?? ""
+            edit.draft = fresh
+            edit.displayNameText = fresh.displayName ?? ""
         }
     }
 
     private func revert() {
-        draft = rule
-        displayNameText = rule.displayName ?? ""
+        edit.draft = rule
+        edit.displayNameText = rule.displayName ?? ""
     }
 
     private func commit() {
-        var updated = draft
-        let trimmed = displayNameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        var updated = edit.draft
+        let trimmed = edit.displayNameText.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.displayName = trimmed.isEmpty ? nil : trimmed
         service.updateRule(updated)
         if let saved = service.rules.first(where: { $0.id == rule.id }) {
-            draft = saved
-            displayNameText = saved.displayName ?? ""
+            edit.draft = saved
+            edit.displayNameText = saved.displayName ?? ""
         }
     }
 }
@@ -426,6 +445,7 @@ struct RulesView: View {
     @ObservedObject var service: TrackingService
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            Text("Untracked time is shown on Overview and History. This tab lists recorded activity that needs a classification rule; pauses and collection gaps cannot be classified.").font(.caption).foregroundStyle(.secondary)
             Text("Rules apply forward by default. Exact host → scoped subdomain → domain → app → Undefined. Higher priority wins ties.").font(.callout)
             Text("Display names are for your reference only; matching still uses the pattern.").font(.caption).foregroundStyle(.secondary)
             HStack {
@@ -586,7 +606,7 @@ struct SettingsView: View {
                     get: { service.editedSettings.effectiveWarnBeforeInactiveSeconds },
                     set: { service.editedSettings.warnBeforeInactiveSeconds = $0 }),
                     in: 0...(max(0, service.editedSettings.passiveMinutes * 60 - 5)), step: 5)
-                Text("0 disables that advance warning. Each fires once per idle episode before the boundary, then resets after input. Respects quiet hours, snoozes, and skips during detected work calls.").font(.caption)
+                Text("0 disables that advance warning. Each fires once per idle episode before the boundary, then resets after input. Respects snoozes and skips during detected work calls.").font(.caption)
                 Toggle("Warn when going into passive", isOn: $service.editedSettings.warnWhenEnteringPassive)
                 Toggle("Warn when going into inactive", isOn: $service.editedSettings.warnWhenEnteringInactive)
                 Text("Activity alerts (before/at passive or inactive) ignore quiet hours. Weekly pace alerts still respect quiet hours. All require Alerts enabled, Save settings, and macOS notification permission via Authorize.").font(.caption)

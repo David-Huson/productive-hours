@@ -77,3 +77,11 @@ Main status compares logged productive time with your configured target range mu
 The weekly forecast remains separate and needs three usable days. The dashboard displays expected-by-now versus logged time even while that forecast calibrates.
 
 The overview burnup chart plots daily cumulative productive time, a dashed pace line toward the upper target, and the weekly target band. The pace line advances during configured working hours and stays flat outside them. Future actual points are omitted.
+
+## Investigating activity
+
+Use History chart tooltips for daily totals and the Overview untracked-time breakdown for pauses and collection gaps. The experimental timeline was removed in v0.1.11 after reported interaction slowdowns. Recorded activity remains available in local storage.
+
+## Rule editing and activity alerts
+
+Rules support optional display names and inline Save/Revert editing. Settings changes show a floating Save/Revert bar. The menu-bar icon shows activity status. Activity alerts can warn before or when entering passive/inactive; they respect snoozes but ignore quiet hours. Weekly pace alerts still respect quiet hours. Upgrades preserve existing warning timing and saved settings.
