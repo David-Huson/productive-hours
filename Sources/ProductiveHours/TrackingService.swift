@@ -19,6 +19,7 @@ final class TrackingService: ObservableObject {
     @Published var references: [ReferenceTotal] = []
     @Published var manual: [ManualWork] = []
     @Published var currentState: ActivityState = .unknown
+    @Published private(set) var menuBarActivityIndicator: MenuBarActivityIndicator = .hidden
     @Published var currentApp = ""
     @Published var status = "Paused"
     @Published var stablePace = "Loading"
@@ -33,6 +34,7 @@ final class TrackingService: ObservableObject {
     @Published var meetingEnd: Date?
     @Published var ruleKind: ClassificationRule.Kind = .app
     @Published var rulePattern = ""
+    @Published var ruleDisplayName = ""
     @Published var ruleClass: ProductivityClass = .productive
     @Published var rulePriority = 0
     @Published var preview: String?
@@ -57,7 +59,8 @@ final class TrackingService: ObservableObject {
     private var refreshTimer: Timer?
     private var meetingStart: Date?
     private var forecastAlert = ForecastAlertState()
-    private var idleWarning = IdleWarningState()
+    private var advanceModeWarning = AdvanceModeWarningState()
+    private var activityTransition = ActivityTransitionNotifier()
     private var archived: [ArchivedDay] = []
     private var notificationDates: [String: Date] = [:]
     private var pendingRules: [ClassificationRule]?
@@ -89,6 +92,8 @@ final class TrackingService: ObservableObject {
             refresh()
             loginEnabled = SMAppService.mainApp.status == .enabled
             collector.onObservation = { [weak self] observation in self?.observe(observation) }
+            refreshMenuBarActivityIndicator()
+            syncNotificationAuthorization()
             if settings.monitoringEnabled { start() }
             refreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.periodic() }
@@ -121,6 +126,15 @@ final class TrackingService: ObservableObject {
         }
     }
     var isCallCrediting: Bool { running && error == nil && engine.isCallCrediting }
+    var menuBarIcon: NSImage { MenuBarIconComposer.make(indicator: menuBarActivityIndicator) }
+    private func refreshMenuBarActivityIndicator() {
+        menuBarActivityIndicator = MenuBarActivityIndicatorPolicy.resolve(
+            running: running,
+            hasError: error != nil,
+            productivity: engine.source.productivity,
+            activity: currentState
+        )
+    }
     var advice: String {
         if let error { return error }
         if !running { return "Tracking is paused. Paused time is a gap in the estimate." }
@@ -167,6 +181,9 @@ final class TrackingService: ObservableObject {
         browserObservation = nil; lastBrowserRead = .distantPast
         running = true; accepting = true; settings.monitoringEnabled = true; settings.hasConsented = true
         do { try store?.save("settings", value: settings) } catch { fail(error); return }
+        activityTransition = ActivityTransitionNotifier()
+        advanceModeWarning = AdvanceModeWarningState()
+        refreshMenuBarActivityIndicator()
         collector.start(); flush()
     }
     func pause() {
@@ -174,12 +191,14 @@ final class TrackingService: ObservableObject {
         apply(.pause(true), at: max(engine.boundary, Date().epochMS))
         running = false; status = "Paused"; settings.monitoringEnabled = false
         callStatus = "Call observation paused"
+        refreshMenuBarActivityIndicator()
         do { try store?.save("settings", value: settings) } catch { fail(error) }
         endMeeting(); flush()
     }
     func shutdown() { guard settings.hasConsented || meetingStart != nil else { return }; accepting = false; collector.stop(); apply(.failure, at: max(engine.boundary, Date().epochMS)); endMeeting(); flush() }
     private func fail(_ failure: Error) {
         error = failure.localizedDescription; accepting = false; running = false; collector.stop(); status = "Data gap"
+        refreshMenuBarActivityIndicator()
     }
     private func observe(_ observation: DiagnosticObservation) {
         guard accepting else { return }
@@ -219,7 +238,9 @@ final class TrackingService: ObservableObject {
             callStatus = "Call observation unavailable · using normal activity rules"
         }
         currentState = engine.state
-        evaluateIdleWarning(idleMS: observation.idleMilliseconds, now: observation.timestamp)
+        refreshMenuBarActivityIndicator()
+        evaluateAdvanceModeWarnings(idleMS: observation.idleMilliseconds, now: observation.timestamp)
+        evaluateActivityTransition(now: observation.timestamp)
         status = engine.state.rawValue.capitalized
         if observation.event != "sample" || Date().timeIntervalSince(lastCommit) >= 30 { flush() }
         if settings.browserEnabled && BrowserObserver.browsers.contains(app) && browserTask == nil && Date().timeIntervalSince(lastBrowserRead) >= 5 {
@@ -279,6 +300,8 @@ final class TrackingService: ObservableObject {
             else if let candidate = paceCandidate, Date().timeIntervalSince(candidate.1) >= 300 { stablePace = next; paceCandidate = nil }
         } catch { fail(error) }
     }
+    var hasUnsavedSettings: Bool { editedSettings != settings }
+    func discardSettingsEdits() { editedSettings = settings }
     func saveSettings() {
         guard editedSettings.valid else { message = "Check timezone, target range, schedule, thresholds and retention."; return }
         let wasRunning = running
@@ -288,20 +311,83 @@ final class TrackingService: ObservableObject {
         do { try store?.save("settings", value: settings); error = nil; refresh(); if wasRunning { start() } }
         catch { fail(error) }
     }
-    func addRule() {
-        let trimmed = rulePattern.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.count <= 253 else { message = "Enter an app bundle ID or hostname."; return }
-        let pattern: String
-        if ruleKind == .app {
-            guard trimmed.contains("."), trimmed.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 46 }) else { message = "Enter an exact app bundle ID, such as com.apple.Terminal."; return }
-            pattern = trimmed
+    func activityLabel(app: String, host: String?) -> String {
+        let resolved = RuleEvaluator.resolve(app: app, host: host, rules: rules)
+        if let ruleID = resolved.ruleID, let rule = rules.first(where: { $0.id == ruleID }) { return rule.label }
+        if let host, !host.isEmpty { return host }
+        return app.isEmpty ? "Unknown source" : app
+    }
+    func normalizedRulePattern(kind: ClassificationRule.Kind, raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 253 else {
+            message = "Enter an app bundle ID or hostname."
+            return nil
         }
-        else { guard let normalized = RuleEvaluator.hostname(trimmed) else { message = "Enter a hostname only, without scheme, path or wildcard."; return }; pattern = normalized }
+        if kind == .app {
+            guard trimmed.contains("."), trimmed.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 46 }) else {
+                message = "Enter an exact app bundle ID, such as com.apple.Terminal."
+                return nil
+            }
+            return trimmed
+        }
+        guard let normalized = RuleEvaluator.hostname(trimmed) else {
+            message = "Enter a hostname only, without scheme, path or wildcard."
+            return nil
+        }
+        return normalized
+    }
+    private func normalizedDisplayName(_ raw: String?) -> String? {
+        let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+        guard trimmed.count <= 80 else {
+            message = "Display name must be 80 characters or fewer."
+            return nil
+        }
+        return trimmed
+    }
+    func addRule() {
+        guard let pattern = normalizedRulePattern(kind: ruleKind, raw: rulePattern) else { return }
+        guard normalizedDisplayName(ruleDisplayName.isEmpty ? nil : ruleDisplayName) != nil
+            || ruleDisplayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let displayName = normalizedDisplayName(ruleDisplayName.isEmpty ? nil : ruleDisplayName)
         var new = rules
         if let index = new.firstIndex(where: { $0.kind == ruleKind && $0.pattern == pattern }) {
-            new[index].productivity = ruleClass; new[index].priority = rulePriority; new[index].version += 1; new[index].enabled = true
-        } else { new.append(ClassificationRule(kind: ruleKind, pattern: pattern, productivity: ruleClass, priority: rulePriority)) }
-        saveRules(new); rulePattern = ""
+            new[index].productivity = ruleClass
+            new[index].priority = rulePriority
+            new[index].enabled = true
+            if let displayName { new[index].displayName = displayName }
+            new[index].version += 1
+        } else {
+            new.append(ClassificationRule(kind: ruleKind, pattern: pattern, productivity: ruleClass, priority: rulePriority, displayName: displayName))
+        }
+        saveRules(new)
+        rulePattern = ""
+        ruleDisplayName = ""
+    }
+    func updateRule(_ updated: ClassificationRule) {
+        guard rules.contains(where: { $0.id == updated.id }) else { return }
+        guard let pattern = normalizedRulePattern(kind: updated.kind, raw: updated.pattern) else { return }
+        guard normalizedDisplayName(updated.displayName) != nil
+            || (updated.displayName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) else { return }
+        let displayName = normalizedDisplayName(updated.displayName)
+        if rules.contains(where: { $0.id != updated.id && $0.kind == updated.kind && $0.pattern == pattern }) {
+            message = "Another rule already uses this type and pattern."
+            return
+        }
+        var new = rules
+        guard let index = new.firstIndex(where: { $0.id == updated.id }) else { return }
+        var rule = new[index]
+        let matchingChanged = rule.kind != updated.kind || rule.pattern != pattern
+            || rule.productivity != updated.productivity || rule.priority != updated.priority || rule.enabled != updated.enabled
+        rule.kind = updated.kind
+        rule.pattern = pattern
+        rule.displayName = displayName
+        rule.productivity = updated.productivity
+        rule.priority = updated.priority
+        rule.enabled = updated.enabled
+        if matchingChanged { rule.version += 1 }
+        new[index] = rule
+        saveRules(new)
     }
     func removeRule(_ id: String) { saveRules(rules.filter { $0.id != id }) }
     func saveRules(_ new: [ClassificationRule]) {
@@ -389,8 +475,25 @@ final class TrackingService: ObservableObject {
                 let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
                 editedSettings.notifications = granted; settings.notifications = granted
                 try store?.save("settings", value: settings)
-                if !granted { message = "Notifications are disabled. Tracking still works." }
+                if !granted { message = "Notifications are disabled in System Settings. Tracking still works." }
+                else { message = "Notification permission granted." }
             } catch { message = "Notification authorization unavailable. Tracking still works." }
+        }
+    }
+    private func syncNotificationAuthorization() {
+        UNUserNotificationCenter.current().getNotificationSettings { [weak self] status in
+            let authorized = status.authorizationStatus == .authorized || status.authorizationStatus == .provisional
+            Task { @MainActor in
+                guard let self else { return }
+                if self.settings.notifications != authorized {
+                    self.settings.notifications = authorized
+                    self.editedSettings.notifications = authorized
+                    try? self.store?.save("settings", value: self.settings)
+                    if !authorized {
+                        self.message = "Alerts are enabled in Worktempo but macOS has not granted notification permission. Use Authorize notifications."
+                    }
+                }
+            }
         }
     }
     func snooze() { snoozedUntil = settings.calendar.date(byAdding: .day, value: 1, to: Date()); try? store?.save("snoozedUntil", value: snoozedUntil) }
@@ -422,18 +525,69 @@ final class TrackingService: ObservableObject {
         let content = UNMutableNotificationContent(); content.title = "Worktempo · Estimate"; content.body = body
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: key, content: content, trigger: nil))
     }
-    private func evaluateIdleWarning(idleMS: Int64?, now: Date) {
-        let allowed = NotificationPolicy.canDeliver(now: now, settings: settings, lastSent: nil,
-            snoozedUntil: max(snoozedUntil ?? .distantPast, typeSnoozes["inactivity_warning"] ?? .distantPast))
-        guard idleWarning.evaluate(idleMS: idleMS, warningSeconds: settings.effectiveIdleWarningSeconds,
-            activeMinutes: settings.activeMinutes,
-            eligible: running && error == nil && engine.state == .active && !engine.isCallCrediting && engine.barriers.isEmpty && allowed) else { return }
-        let remaining = max(1, settings.activeMinutes * 60 - Int((idleMS ?? 0) / 1000))
+    private func evaluateActivityTransition(now: Date) {
+        let eligible = running && error == nil && !engine.paused && engine.healthy
+        guard let transition = activityTransition.evaluate(current: engine.state, eligible: eligible) else { return }
+        switch transition {
+        case .enteredPassive:
+            guard settings.warnWhenEnteringPassive else { return }
+            guard activityNotificationAllowed(type: "activity_passive", now: now) else { return }
+            deliverImmediateNotification(
+                identifier: "activity_passive",
+                title: "Worktempo · Passive time",
+                body: "Activity is now passive. You can still earn productive credit during the passive window if the app is classified as productive.")
+        case .enteredInactive:
+            guard settings.warnWhenEnteringInactive else { return }
+            guard activityNotificationAllowed(type: "activity_inactive", now: now) else { return }
+            deliverImmediateNotification(
+                identifier: "activity_inactive",
+                title: "Worktempo · Inactive",
+                body: "Activity is now inactive. Keyboard and mouse presence no longer count toward productive time until you interact again.")
+        }
+    }
+    private func activityNotificationAllowed(type: String, now: Date) -> Bool {
+        let snooze = max(snoozedUntil ?? .distantPast, typeSnoozes[type] ?? .distantPast)
+        return NotificationPolicy.canDeliverActivityAlert(now: now, settings: settings, snoozedUntil: snooze)
+    }
+    private func deliverImmediateNotification(identifier: String, title: String, body: String) {
         let content = UNMutableNotificationContent()
-        content.title = "Worktempo · Inactivity warning"
-        content.body = "No input for \(Int((idleMS ?? 0) / 1000)) seconds. Passive time starts in about \(remaining) seconds. If you’re still working, mouse or keyboard activity resets the idle timer."
+        content.title = title
+        content.body = body
         content.sound = .default
-        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "inactivity_warning", content: content, trigger: nil))
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil))
+    }
+
+    private func evaluateAdvanceModeWarnings(idleMS: Int64?, now: Date) {
+        let activeMS = Int64(settings.activeMinutes) * 60_000
+        let passiveMS = Int64(settings.passiveMinutes) * 60_000
+        let baseEligible = running && error == nil && engine.healthy && !engine.paused && engine.barriers.isEmpty
+        let passiveEligible = baseEligible && engine.state == .active && !engine.isCallCrediting
+            && activityNotificationAllowed(type: "before_passive", now: now)
+        let inactiveEligible = baseEligible && engine.state == .passive && !engine.isCallCrediting
+            && activityNotificationAllowed(type: "before_inactive", now: now)
+        let advance = advanceModeWarning.evaluate(
+            idleMS: idleMS,
+            activeMS: activeMS,
+            passiveMS: passiveMS,
+            warnBeforePassiveSeconds: settings.effectiveWarnBeforePassiveSeconds,
+            warnBeforeInactiveSeconds: settings.effectiveWarnBeforeInactiveSeconds,
+            passiveEligible: passiveEligible,
+            inactiveEligible: inactiveEligible)
+        if advance.beforePassive {
+            let remaining = max(1, settings.activeMinutes * 60 - Int((idleMS ?? 0) / 1000))
+            deliverImmediateNotification(
+                identifier: "before_passive",
+                title: "Worktempo · Passive soon",
+                body: "Passive time starts in about \(remaining) seconds. Mouse or keyboard activity resets the idle timer.")
+        }
+        if advance.beforeInactive {
+            let boundary = settings.activeMinutes * 60 + settings.passiveMinutes * 60
+            let remaining = max(1, boundary - Int((idleMS ?? 0) / 1000))
+            deliverImmediateNotification(
+                identifier: "before_inactive",
+                title: "Worktempo · Inactive soon",
+                body: "Inactive time starts in about \(remaining) seconds. Productive credit from presence will stop until you interact again.")
+        }
     }
 }
 

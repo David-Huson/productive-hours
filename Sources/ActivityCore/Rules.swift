@@ -9,8 +9,15 @@ public struct ClassificationRule: Codable, Identifiable, Equatable, Sendable {
     public var priority: Int = 0
     public var enabled = true
     public var version = 1
-    public init(kind: Kind, pattern: String, productivity: ProductivityClass, priority: Int = 0) {
+    /// Optional friendly label; matching still uses `pattern` only.
+    public var displayName: String?
+    public var label: String {
+        let trimmed = displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? pattern : trimmed
+    }
+    public init(kind: Kind, pattern: String, productivity: ProductivityClass, priority: Int = 0, displayName: String? = nil) {
         self.kind = kind; self.pattern = pattern; self.productivity = productivity; self.priority = priority
+        self.displayName = displayName
     }
 }
 
@@ -60,7 +67,23 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var retentionDays = 90
     public var notifications = false
     public var idleWarningAfterSeconds: Int?
-    public var effectiveIdleWarningSeconds: Int { min(max(0, idleWarningAfterSeconds ?? 90), activeMinutes * 60 - 5) }
+    /// Seconds before the active→passive boundary; nil inherits `idleWarningAfterSeconds` then 90.
+    public var warnBeforePassiveSeconds: Int?
+    /// Seconds before the passive→inactive boundary; 0 disables.
+    public var warnBeforeInactiveSeconds: Int?
+    public var warnWhenEnteringPassive = false
+    public var warnWhenEnteringInactive = false
+    public var effectiveIdleWarningSeconds: Int { effectiveWarnBeforePassiveSeconds }
+    public var effectiveWarnBeforePassiveSeconds: Int {
+        let raw = warnBeforePassiveSeconds ?? idleWarningAfterSeconds ?? 90
+        let cap = max(0, activeMinutes * 60 - 5)
+        return min(max(0, raw), cap)
+    }
+    public var effectiveWarnBeforeInactiveSeconds: Int {
+        let raw = warnBeforeInactiveSeconds ?? 0
+        let cap = max(0, passiveMinutes * 60 - 5)
+        return min(max(0, raw), cap)
+    }
     public var quietStart = 18
     public var quietEnd = 9
     public var browserEnabled = false

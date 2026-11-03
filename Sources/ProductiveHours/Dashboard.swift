@@ -290,8 +290,11 @@ struct HistoryView: View {
                         let rows = service.intervals.filter { $0.start < next.epochMS && $0.end > day.date.epochMS }
                         let groups = Dictionary(grouping: rows, by: { $0.source.host ?? $0.source.app })
                         ForEach(groups.keys.sorted(), id: \.self) { key in
-                            let seconds = groups[key, default: []].reduce(0.0) { $0 + Double(min($1.end, next.epochMS) - max($1.start, day.date.epochMS)) / 1000 }
-                            HStack { Text(key.isEmpty ? "Unknown source" : key); Spacer(); Text(Metrics.duration(seconds)) }.font(.caption)
+                            let rows = groups[key, default: []]
+                            let seconds = rows.reduce(0.0) { $0 + Double(min($1.end, next.epochMS) - max($1.start, day.date.epochMS)) / 1000 }
+                            let sample = rows.first
+                            let title = sample.map { service.activityLabel(app: $0.source.app, host: $0.source.host) } ?? (key.isEmpty ? "Unknown source" : key)
+                            HStack { Text(title); Spacer(); Text(Metrics.duration(seconds)) }.font(.caption)
                         }
                     } label: {
                         HStack { Text(Metrics.dayLabel(day.date, calendar: service.settings.calendar)); Spacer(); Text(Metrics.duration(day.productive)).monospacedDigit() }
@@ -355,32 +358,96 @@ private struct HistoryDayTooltip: View {
     }
 }
 
+private struct EditableRuleRow: View {
+    @ObservedObject var service: TrackingService
+    let rule: ClassificationRule
+    @State private var draft: ClassificationRule
+    @State private var displayNameText: String
+
+    init(service: TrackingService, rule: ClassificationRule) {
+        self.service = service
+        self.rule = rule
+        _draft = State(initialValue: rule)
+        _displayNameText = State(initialValue: rule.displayName ?? "")
+    }
+
+    private var draftChanged: Bool {
+        draft != rule || displayNameText.trimmingCharacters(in: .whitespacesAndNewlines) != (rule.displayName ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Display name", text: $displayNameText)
+            HStack(spacing: 8) {
+                Picker("Type", selection: $draft.kind) {
+                    ForEach(ClassificationRule.Kind.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }.frame(width: 130)
+                TextField(draft.kind == .app ? "Bundle ID" : "Hostname", text: $draft.pattern)
+                Picker("Class", selection: $draft.productivity) {
+                    ForEach(ProductivityClass.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }.frame(width: 140)
+                Stepper("Priority \(draft.priority)", value: $draft.priority, in: -100...100).frame(width: 130)
+            }
+            HStack {
+                Toggle("Enabled", isOn: $draft.enabled)
+                Spacer()
+                Text("v\(draft.version) · \(draft.pattern)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Button("Save") { commit() }.disabled(!draftChanged)
+                Button("Revert") { revert() }.disabled(!draftChanged)
+                Button("Remove", role: .destructive) { service.removeRule(rule.id) }
+            }
+        }
+        .padding(.vertical, 4)
+        .onChange(of: rule) { _, fresh in
+            guard !draftChanged else { return }
+            draft = fresh
+            displayNameText = fresh.displayName ?? ""
+        }
+    }
+
+    private func revert() {
+        draft = rule
+        displayNameText = rule.displayName ?? ""
+    }
+
+    private func commit() {
+        var updated = draft
+        let trimmed = displayNameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.displayName = trimmed.isEmpty ? nil : trimmed
+        service.updateRule(updated)
+        if let saved = service.rules.first(where: { $0.id == rule.id }) {
+            draft = saved
+            displayNameText = saved.displayName ?? ""
+        }
+    }
+}
+
 struct RulesView: View {
     @ObservedObject var service: TrackingService
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Rules apply forward by default. Exact host → scoped subdomain → domain → app → Undefined. Higher priority wins ties.").font(.callout)
+            Text("Display names are for your reference only; matching still uses the pattern.").font(.caption).foregroundStyle(.secondary)
             HStack {
-                Picker("Type", selection: $service.ruleKind) { ForEach(ClassificationRule.Kind.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.frame(width: 170)
+                TextField("Display name", text: $service.ruleDisplayName).frame(minWidth: 120)
+                Picker("Type", selection: $service.ruleKind) { ForEach(ClassificationRule.Kind.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.frame(width: 130)
                 TextField(service.ruleKind == .app ? "com.example.app" : "example.com", text: $service.rulePattern)
-                Picker("Class", selection: $service.ruleClass) { ForEach(ProductivityClass.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.frame(width: 180)
+                Picker("Class", selection: $service.ruleClass) { ForEach(ProductivityClass.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.frame(width: 150)
                 Stepper("Priority \(service.rulePriority)", value: $service.rulePriority, in: -100...100).frame(width: 130)
-                Button("Save rule") { service.addRule() }
+                Button("Add rule") { service.addRule() }
             }
             List {
                 Section("Rules") {
                     ForEach(service.rules) { rule in
-                        HStack {
-                            VStack(alignment: .leading) { Text(rule.pattern); Text("\(rule.kind.rawValue) · priority \(rule.priority) · version \(rule.version)").font(.caption).foregroundStyle(.secondary) }
-                            Spacer(); Text(rule.productivity.rawValue)
-                            Button("Remove") { service.removeRule(rule.id) }
-                        }
+                        EditableRuleRow(service: service, rule: rule)
                     }
                 }
                 Section("Rule change history") {
                     ForEach(service.ruleRevisions.prefix(30)) { revision in
                         DisclosureGroup("\(revision.date.formatted()) · \(revision.action)") {
-                            ForEach(revision.rules) { rule in Text("\(rule.pattern) → \(rule.productivity.rawValue) · v\(rule.version)").font(.caption) }
+                            ForEach(revision.rules) { rule in
+                                Text("\(rule.label) (\(rule.pattern)) → \(rule.productivity.rawValue) · v\(rule.version)").font(.caption)
+                            }
                         }
                     }
                 }
@@ -388,9 +455,16 @@ struct RulesView: View {
                     let grouped = Dictionary(grouping: service.intervals.filter { $0.source.productivity == .undefined && ($0.activity == .active || $0.activity == .passive) }, by: { $0.source.host ?? $0.source.app })
                     let sorted = grouped.keys.sorted { grouped[$0, default: []].reduce(0) { $0 + $1.seconds } > grouped[$1, default: []].reduce(0) { $0 + $1.seconds } }
                     ForEach(sorted.filter { !$0.isEmpty }, id: \.self) { key in
+                        let sample = grouped[key]?.first
                         HStack {
-                            Text(key); Spacer(); Text(Metrics.duration(grouped[key, default: []].reduce(0) { $0 + $1.seconds }))
-                            Button("Classify") { service.rulePattern = key; service.ruleKind = grouped[key]?.first?.source.host == nil ? .app : .exactHost }
+                            Text(key)
+                            Spacer()
+                            Text(Metrics.duration(grouped[key, default: []].reduce(0) { $0 + $1.seconds }))
+                            Button("Classify") {
+                                service.rulePattern = key
+                                service.ruleKind = sample?.source.host == nil ? .app : .exactHost
+                                service.ruleDisplayName = ""
+                            }
                         }
                     }
                 }
@@ -469,7 +543,8 @@ struct CalibrationView: View {
 struct SettingsView: View {
     @ObservedObject var service: TrackingService
     var body: some View {
-        Form {
+        ZStack(alignment: .bottom) {
+            Form {
             Section("Weekly target and schedule") {
                 TextField("IANA timezone", text: $service.editedSettings.timezone)
                 Picker("Week starts", selection: $service.editedSettings.weekStart) {
@@ -500,14 +575,24 @@ struct SettingsView: View {
             }
             Section("Notifications and startup") {
                 Toggle("Alerts enabled", isOn: $service.editedSettings.notifications)
-                Stepper("Warn after \(service.editedSettings.effectiveIdleWarningSeconds) seconds without input", value: Binding(
-                    get: { service.editedSettings.effectiveIdleWarningSeconds },
-                    set: { service.editedSettings.idleWarningAfterSeconds = $0 }),
-                    in: 0...(service.editedSettings.activeMinutes * 60 - 5), step: 5)
-                Text("0 disables inactivity warnings. Warns once before passive time begins; resets after input. Respects quiet hours and snoozes. No warning during detected work calls.").font(.caption)
+                Stepper("Warn \(service.editedSettings.effectiveWarnBeforePassiveSeconds) seconds before passive", value: Binding(
+                    get: { service.editedSettings.effectiveWarnBeforePassiveSeconds },
+                    set: {
+                        service.editedSettings.warnBeforePassiveSeconds = $0
+                        service.editedSettings.idleWarningAfterSeconds = $0
+                    }),
+                    in: 0...(max(0, service.editedSettings.activeMinutes * 60 - 5)), step: 5)
+                Stepper("Warn \(service.editedSettings.effectiveWarnBeforeInactiveSeconds) seconds before inactive", value: Binding(
+                    get: { service.editedSettings.effectiveWarnBeforeInactiveSeconds },
+                    set: { service.editedSettings.warnBeforeInactiveSeconds = $0 }),
+                    in: 0...(max(0, service.editedSettings.passiveMinutes * 60 - 5)), step: 5)
+                Text("0 disables that advance warning. Each fires once per idle episode before the boundary, then resets after input. Respects quiet hours, snoozes, and skips during detected work calls.").font(.caption)
+                Toggle("Warn when going into passive", isOn: $service.editedSettings.warnWhenEnteringPassive)
+                Toggle("Warn when going into inactive", isOn: $service.editedSettings.warnWhenEnteringInactive)
+                Text("Activity alerts (before/at passive or inactive) ignore quiet hours. Weekly pace alerts still respect quiet hours. All require Alerts enabled, Save settings, and macOS notification permission via Authorize.").font(.caption)
                 HStack { Button("Authorize notifications…") { service.enableNotifications() }; Button("Snooze alerts for one day") { service.snooze() } }
                 Menu("Snooze a specific alert for 24 hours") {
-                    ForEach(["inactivity_warning", "behind_weekly_pace", "projected_over_maximum", "minimum_reached", "maximum_reached", "collection_stopped", "coverage_degraded"], id: \.self) { type in
+                    ForEach(["before_passive", "before_inactive", "inactivity_warning", "activity_passive", "activity_inactive", "behind_weekly_pace", "projected_over_maximum", "minimum_reached", "maximum_reached", "collection_stopped", "coverage_degraded"], id: \.self) { type in
                         Button(type.replacingOccurrences(of: "_", with: " ")) { service.snooze(type: type) }
                     }
                 }
@@ -515,7 +600,6 @@ struct SettingsView: View {
                 Stepper("Quiet hours end at \(service.editedSettings.quietEnd):00", value: $service.editedSettings.quietEnd, in: 0...23)
                 Toggle("Launch at login", isOn: Binding(get: { service.loginEnabled }, set: { service.setLogin($0) }))
             }
-            Button("Save settings") { service.saveSettings() }.buttonStyle(.borderedProminent)
             Section("Data control") {
                 Button("Export aggregated statistics…") { service.exportCSV() }
                 Button("Delete all local data…", role: .destructive) { service.confirmDelete = true }
@@ -524,6 +608,34 @@ struct SettingsView: View {
                     HStack { Button("Delete permanently", role: .destructive) { service.deleteAll() }; Button("Cancel") { service.confirmDelete = false } }
                 }
             }
-        }.formStyle(.grouped)
+            }
+            .formStyle(.grouped)
+            .padding(.bottom, service.hasUnsavedSettings ? 52 : 0)
+            if service.hasUnsavedSettings {
+                SettingsUnsavedChangesBar(service: service)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: service.hasUnsavedSettings)
+    }
+}
+
+private struct SettingsUnsavedChangesBar: View {
+    @ObservedObject var service: TrackingService
+    var body: some View {
+        HStack(spacing: 12) {
+            Text("Unsaved changes").font(.callout).foregroundStyle(.secondary)
+            Spacer()
+            Button("Revert") { service.discardSettingsEdits() }
+            Button("Save settings") { service.saveSettings() }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut("s", modifiers: .command)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity)
+        .background(.regularMaterial)
+        .overlay(alignment: .top) { Divider() }
+        .shadow(color: .black.opacity(0.12), radius: 8, y: -2)
     }
 }

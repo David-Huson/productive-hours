@@ -3,6 +3,15 @@ import Testing
 @testable import ActivityCore
 
 private func date(_ text: String) -> Date { ISO8601DateFormatter().date(from: text)! }
+@Test func ruleLabelPrefersDisplayName() {
+    var rule = ClassificationRule(kind: .app, pattern: "com.todesktop.230313mzl4w4u92", productivity: .productive)
+    #expect(rule.label == "com.todesktop.230313mzl4w4u92")
+    rule.displayName = "Cursor"
+    #expect(rule.label == "Cursor")
+    rule.displayName = "  "
+    #expect(rule.label == "com.todesktop.230313mzl4w4u92")
+}
+
 @Test func hostPrecedenceAndExclusionOverrideBrowser() {
     let rules = [
         ClassificationRule(kind: .app, pattern: "chrome", productivity: .productive),
