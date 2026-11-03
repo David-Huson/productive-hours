@@ -620,6 +620,18 @@ struct SettingsView: View {
                 Stepper("Quiet hours end at \(service.editedSettings.quietEnd):00", value: $service.editedSettings.quietEnd, in: 0...23)
                 Toggle("Launch at login", isOn: Binding(get: { service.loginEnabled }, set: { service.setLogin($0) }))
             }
+            Section("Discord Rich Presence") {
+                Toggle("Show activity on Discord", isOn: $service.editedSettings.discordRichPresenceEnabled)
+                TextField("Application ID", text: $service.editedSettings.discordApplicationId)
+                    .disabled(!service.editedSettings.discordRichPresenceEnabled)
+                Toggle("Show daily total", isOn: $service.editedSettings.discordShowDailyTotal)
+                    .disabled(!service.editedSettings.discordRichPresenceEnabled)
+                Toggle("Show weekly total", isOn: $service.editedSettings.discordShowWeeklyTotal)
+                    .disabled(!service.editedSettings.discordRichPresenceEnabled)
+                Toggle("Show weekly breakdown", isOn: $service.editedSettings.discordShowWeeklyBreakdown)
+                    .disabled(!service.editedSettings.discordRichPresenceEnabled)
+                Text("Name your Discord application Worktempo in the Developer Portal so the profile title matches. The member list uses the status line (Worktempo: Active 🟢). Totals appear on the second line; weekly breakdown appears when you hover the artwork. Requires a recent Discord desktop client. See docs/discord-rich-presence.md.").font(.caption)
+            }
             Section("Data control") {
                 Button("Export aggregated statistics…") { service.exportCSV() }
                 Button("Delete all local data…", role: .destructive) { service.confirmDelete = true }

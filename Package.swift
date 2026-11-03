@@ -15,7 +15,20 @@ let package = Package(
         .systemLibrary(name: "CSQLite"),
         .target(name: "Persistence", dependencies: ["ActivityCore", "CSQLite"]),
         .target(name: "PlatformCollectors", dependencies: ["ActivityCore"]),
-        .executableTarget(name: "ProductiveHours", dependencies: ["PlatformCollectors", "Persistence"]),
+        .target(
+            name: "DiscordRPCBridge",
+            path: "Sources/DiscordRPCBridge",
+            sources: ["src"],
+            publicHeadersPath: "include",
+            cxxSettings: [
+                .headerSearchPath("src"),
+                .headerSearchPath("thirdparty/rapidjson/include"),
+                .define("DISCORD_OSX"),
+            ],
+            linkerSettings: [.linkedFramework("AppKit"), .linkedFramework("CoreServices")]
+        ),
+        .target(name: "DiscordPresence", dependencies: ["DiscordRPCBridge", "ActivityCore"]),
+        .executableTarget(name: "ProductiveHours", dependencies: ["PlatformCollectors", "Persistence", "DiscordPresence"]),
         .executableTarget(name: "CrashHarness", dependencies: ["ActivityCore", "Persistence"]),
         .executableTarget(name: "CallProbe", dependencies: ["PlatformCollectors"]),
         .executableTarget(name: "PlatformProbe", dependencies: ["PlatformCollectors"]),

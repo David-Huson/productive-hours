@@ -6,6 +6,7 @@ import ServiceManagement
 import ActivityCore
 import PlatformCollectors
 import Persistence
+import DiscordPresence
 
 @MainActor
 final class TrackingService: ObservableObject {
@@ -49,6 +50,8 @@ final class TrackingService: ObservableObject {
     private var engine = TrackingEngine(start: Date().epochMS)
     private var pending: [Interval] = []
     private let collector = PlatformCollector()
+    private let discordPresence = DiscordPresenceClient()
+    private var discordTrackingStartedAt: Date?
     private let browser = BrowserObserver()
     private var browserTask: Task<Void, Never>?
     private var browserObservation: BrowserObservation?
@@ -93,6 +96,7 @@ final class TrackingService: ObservableObject {
             loginEnabled = SMAppService.mainApp.status == .enabled
             collector.onObservation = { [weak self] observation in self?.observe(observation) }
             refreshMenuBarActivityIndicator()
+            applyDiscordConfiguration()
             syncNotificationAuthorization()
             if settings.monitoringEnabled { start() }
             refreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
@@ -134,6 +138,26 @@ final class TrackingService: ObservableObject {
             productivity: engine.source.productivity,
             activity: currentState
         )
+        refreshDiscordPresence()
+    }
+    private func applyDiscordConfiguration() {
+        discordPresence.configure(
+            enabled: settings.discordRichPresenceEnabled && settings.discordApplicationIdValid,
+            applicationId: settings.discordApplicationId)
+    }
+    private func refreshDiscordPresence() {
+        applyDiscordConfiguration()
+        let today = totals.first { settings.calendar.isDateInToday($0.date) }?.productive ?? 0
+        let formatted = DiscordPresenceCopy.format(
+            indicator: menuBarActivityIndicator,
+            todayProductive: today,
+            week: liveWeek,
+            calendar: settings.calendar,
+            showDaily: settings.discordShowDailyTotal,
+            showWeekly: settings.discordShowWeeklyTotal,
+            showBreakdown: settings.discordShowWeeklyBreakdown,
+            trackingStartedAt: discordTrackingStartedAt)
+        discordPresence.update(presence: formatted, tracking: running && error == nil)
     }
     var advice: String {
         if let error { return error }
@@ -183,6 +207,7 @@ final class TrackingService: ObservableObject {
         do { try store?.save("settings", value: settings) } catch { fail(error); return }
         activityTransition = ActivityTransitionNotifier()
         advanceModeWarning = AdvanceModeWarningState()
+        discordTrackingStartedAt = Date()
         refreshMenuBarActivityIndicator()
         collector.start(); flush()
     }
@@ -191,7 +216,9 @@ final class TrackingService: ObservableObject {
         apply(.pause(true), at: max(engine.boundary, Date().epochMS))
         running = false; status = "Paused"; settings.monitoringEnabled = false
         callStatus = "Call observation paused"
+        discordTrackingStartedAt = nil
         refreshMenuBarActivityIndicator()
+        discordPresence.shutdown()
         do { try store?.save("settings", value: settings) } catch { fail(error) }
         endMeeting(); flush()
     }
@@ -304,11 +331,21 @@ final class TrackingService: ObservableObject {
     func discardSettingsEdits() { editedSettings = settings }
     func saveSettings() {
         guard editedSettings.valid else { message = "Check timezone, target range, schedule, thresholds and retention."; return }
+        if editedSettings.discordRichPresenceEnabled && !editedSettings.discordApplicationIdValid {
+            message = "Enter a numeric Discord Application ID from the Developer Portal, or turn off Discord Rich Presence."
+            return
+        }
         let wasRunning = running
         if wasRunning { pause() }
         settings = editedSettings; settings.monitoringEnabled = wasRunning
         browserStatus = settings.browserEnabled ? "Waiting for supported browser" : "Browser tracking disabled"
-        do { try store?.save("settings", value: settings); error = nil; refresh(); if wasRunning { start() } }
+        do {
+            try store?.save("settings", value: settings)
+            error = nil
+            applyDiscordConfiguration()
+            refresh()
+            if wasRunning { start() }
+        }
         catch { fail(error) }
     }
     func activityLabel(app: String, host: String?) -> String {
@@ -461,6 +498,7 @@ final class TrackingService: ObservableObject {
             if FileManager.default.fileExists(atPath: diagnostics.path) { try FileManager.default.removeItem(at: diagnostics) }
             settings = AppSettings(); editedSettings = settings; rules = []; engine = TrackingEngine(start: Date().epochMS); pending = []; notificationDates = [:]; snoozedUntil = nil
             trace = DiagnosticTrace(fileURL: Self.directory.appending(path: "Diagnostics/phase-0.json")); typeSnoozes = [:]; forecastAlert = ForecastAlertState()
+            discordPresence.shutdown()
             error = nil; message = "Local activity, rules, references, settings and diagnostic data deleted."; refresh(); confirmDelete = false
             UNUserNotificationCenter.current().removeAllPendingNotificationRequests(); UNUserNotificationCenter.current().removeAllDeliveredNotifications()
         } catch { fail(error) }
