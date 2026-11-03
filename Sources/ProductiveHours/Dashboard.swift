@@ -299,12 +299,15 @@ struct HistoryView: View {
                             .font(.callout).frame(maxWidth: .infinity, alignment: .leading).padding(6)
                         let next = service.settings.calendar.date(byAdding: .day, value: 1, to: day.date)!
                         let rows = service.intervals.filter { $0.start < next.epochMS && $0.end > day.date.epochMS }
-                        let groups = Dictionary(grouping: rows, by: { $0.source.host ?? $0.source.app })
-                        ForEach(groups.keys.sorted(), id: \.self) { key in
-                            let rows = groups[key, default: []]
+                        let groups = Dictionary(grouping: rows) { service.activityLabel(for: $0.source) }
+                        let titles = groups.keys.sorted { lhs, rhs in
+                            let left = groups[lhs, default: []].reduce(0.0) { $0 + Double(min($1.end, next.epochMS) - max($1.start, day.date.epochMS)) / 1000 }
+                            let right = groups[rhs, default: []].reduce(0.0) { $0 + Double(min($1.end, next.epochMS) - max($1.start, day.date.epochMS)) / 1000 }
+                            return left == right ? lhs.localizedStandardCompare(rhs) == .orderedAscending : left > right
+                        }
+                        ForEach(titles, id: \.self) { title in
+                            let rows = groups[title, default: []]
                             let seconds = rows.reduce(0.0) { $0 + Double(min($1.end, next.epochMS) - max($1.start, day.date.epochMS)) / 1000 }
-                            let sample = rows.first
-                            let title = sample.map { service.activityLabel(app: $0.source.app, host: $0.source.host) } ?? (key.isEmpty ? "Unknown source" : key)
                             HStack { Text(title); Spacer(); Text(Metrics.duration(seconds)) }.font(.caption)
                         }
                     } label: {
@@ -476,12 +479,13 @@ struct RulesView: View {
                     let sorted = grouped.keys.sorted { grouped[$0, default: []].reduce(0) { $0 + $1.seconds } > grouped[$1, default: []].reduce(0) { $0 + $1.seconds } }
                     ForEach(sorted.filter { !$0.isEmpty }, id: \.self) { key in
                         let sample = grouped[key]?.first
+                        let title = sample.map { service.activityLabel(for: $0.source) } ?? key
                         HStack {
-                            Text(key)
+                            Text(title)
                             Spacer()
                             Text(Metrics.duration(grouped[key, default: []].reduce(0) { $0 + $1.seconds }))
                             Button("Classify") {
-                                service.rulePattern = key
+                                service.rulePattern = sample?.source.host ?? key
                                 service.ruleKind = sample?.source.host == nil ? .app : .exactHost
                                 service.ruleDisplayName = ""
                             }

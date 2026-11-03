@@ -130,6 +130,26 @@ public final class Store {
         }
     }
     public func ruleRevisions() throws -> [RuleRevision] { try read("SELECT payload FROM rule_revisions ORDER BY rowid DESC") }
+    /// Re-resolve retained intervals with the current rule set. Skips private browsing and call-audio rows.
+    public func reconcileIntervalSources(rules: [ClassificationRule]) throws -> Int {
+        let rows = try intervals()
+        var updates: [Interval] = []
+        for row in rows {
+            if row.source.privateBrowsing || row.reason == "call_audio" { continue }
+            let resolved = RuleEvaluator.resolve(app: row.source.app, host: row.source.host, rules: rules)
+            guard resolved != row.source else { continue }
+            var updated = row
+            updated.source = resolved
+            updates.append(updated)
+        }
+        guard !updates.isEmpty else { return 0 }
+        try transaction {
+            for row in updates {
+                try execute("UPDATE intervals SET payload=? WHERE id=?", [.text(try json(row)), .text(row.id)])
+            }
+        }
+        return updates.count
+    }
     public func reclassify(rules: [ClassificationRule], previousRules: [ClassificationRule], at time: Date) throws {
         let before = try intervals()
         let after = before.map { row in

@@ -55,6 +55,8 @@ final class TrackingService: ObservableObject {
     private let browser = BrowserObserver()
     private var browserTask: Task<Void, Never>?
     private var browserObservation: BrowserObservation?
+    /// Last hostname read per browser app; used between AppleScript polls and after the live observation ages out.
+    private var stickyBrowserHost: [String: String] = [:]
     private var lastBrowserRead = Date.distantPast
     private var lastCommit = Date.distantPast
     private var lastRetention = Date.distantPast
@@ -69,6 +71,9 @@ final class TrackingService: ObservableObject {
     private var pendingRules: [ClassificationRule]?
     private var trace = DiagnosticTrace(fileURL: FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Application Support/ProductiveHours/Diagnostics/phase-0.json"))
     static let directory = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Application Support/ProductiveHours")
+    private static let classificationLedgerKey = "intervalClassificationLedger"
+    /// Bump when retained-interval classification semantics change (requires one-time reconcile).
+    private static let classificationLedgerVersion = 2
 
     init() {
         AppDelegate.service = self
@@ -92,6 +97,7 @@ final class TrackingService: ObservableObject {
                 if meeting.lastConfirmed > meeting.start { try storage.addManual(ManualWork(start: meeting.start, end: meeting.lastConfirmed, kind: "user_declared_meeting_recovered")) }
                 try storage.remove("meetingCheckpoint")
             }
+            try migrateIntervalClassificationIfNeeded(storage: storage)
             refresh()
             loginEnabled = SMAppService.mainApp.status == .enabled
             collector.onObservation = { [weak self] observation in self?.observe(observation) }
@@ -246,9 +252,12 @@ final class TrackingService: ObservableObject {
         let barriers: [String: (String, Bool)] = ["sleep": ("sleep", true), "wake": ("sleep", false), "display_sleep": ("display", true), "display_wake": ("display", false), "session_inactive": ("session", true), "session_active": ("session", false)]
         if let (name, entering) = barriers[observation.event] { apply(.barrier(name, entering), at: now) }
         let app = observation.bundleID ?? ""
-        if app != currentApp { browserObservation = nil }
+        if app != currentApp {
+            browserObservation = nil
+            if BrowserObserver.browsers.contains(app) { lastBrowserRead = .distantPast }
+        }
         currentApp = app
-        let freshHost = browserObservation.flatMap { value in value.app == app && observation.timestamp.timeIntervalSince(value.observedAt) <= 10 ? value.host : nil }
+        let freshHost = browserHost(for: app)
         var source = RuleEvaluator.resolve(app: app, host: freshHost, rules: rules)
         if browserObservation?.status == "Private browsing excluded" && browserObservation?.app == app { source.productivity = .ignored; source.ruleID = nil; source.privateBrowsing = true }
         apply(.foreground(source), at: now)
@@ -277,12 +286,43 @@ final class TrackingService: ObservableObject {
                 guard let self else { return }
                 self.browserTask = nil
                 guard !Task.isCancelled, self.running, self.settings.browserEnabled, self.currentApp == value.app else { return }
-                self.browserObservation = value; self.browserStatus = value.status
+                self.recordBrowserObservation(value)
+                self.browserStatus = value.status
                 // Domain events are observations, never input. Reconcile foreground at event delivery.
                 self.collector.sample(event: "domain_changed")
             }
         }
     }
+
+    private func migrateIntervalClassificationIfNeeded(storage: Store) throws {
+        let ledger = try storage.load(Self.classificationLedgerKey, as: Int.self) ?? 0
+        guard ledger < Self.classificationLedgerVersion else { return }
+        let updated = try storage.reconcileIntervalSources(rules: rules)
+        try storage.save(Self.classificationLedgerKey, value: Self.classificationLedgerVersion)
+        if updated > 0 {
+            message = "Reclassified \(updated) retained intervals using current browser hostname rules."
+        }
+    }
+
+    private func browserHost(for app: String) -> String? {
+        guard settings.browserEnabled, BrowserObserver.browsers.contains(app) else { return nil }
+        if let observation = browserObservation, observation.app == app, let host = observation.host, !host.isEmpty {
+            return host
+        }
+        return stickyBrowserHost[app]
+    }
+
+    private func recordBrowserObservation(_ value: BrowserObservation) {
+        browserObservation = value
+        if let host = value.host, !host.isEmpty {
+            stickyBrowserHost[value.app] = host
+            return
+        }
+        if value.status == "No supported website" || value.status == "Private browsing excluded" {
+            stickyBrowserHost.removeValue(forKey: value.app)
+        }
+    }
+
     private func periodic() {
         if !running && error == nil && settings.hasConsented { apply(.tick, at: max(engine.boundary, Date().epochMS)); flush() }
         if let end = meetingEnd, Date() >= end { endMeeting() }
@@ -348,11 +388,8 @@ final class TrackingService: ObservableObject {
         }
         catch { fail(error) }
     }
-    func activityLabel(app: String, host: String?) -> String {
-        let resolved = RuleEvaluator.resolve(app: app, host: host, rules: rules)
-        if let ruleID = resolved.ruleID, let rule = rules.first(where: { $0.id == ruleID }) { return rule.label }
-        if let host, !host.isEmpty { return host }
-        return app.isEmpty ? "Unknown source" : app
+    func activityLabel(for source: Source) -> String {
+        ActivityLabel.label(for: source, rules: rules)
     }
     func normalizedRulePattern(kind: ClassificationRule.Kind, raw: String) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
