@@ -54,9 +54,7 @@ final class TrackingService: ObservableObject {
     private var discordTrackingStartedAt: Date?
     private let browser = BrowserObserver()
     private var browserTask: Task<Void, Never>?
-    private var browserObservation: BrowserObservation?
-    /// Last hostname read per browser app; used between AppleScript polls and after the live observation ages out.
-    private var stickyBrowserHost: [String: String] = [:]
+    private var browserObservation = BrowserObservationState()
     private var lastBrowserRead = Date.distantPast
     private var lastCommit = Date.distantPast
     private var lastRetention = Date.distantPast
@@ -71,9 +69,6 @@ final class TrackingService: ObservableObject {
     private var pendingRules: [ClassificationRule]?
     private var trace = DiagnosticTrace(fileURL: FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Application Support/ProductiveHours/Diagnostics/phase-0.json"))
     static let directory = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Application Support/ProductiveHours")
-    private static let classificationLedgerKey = "intervalClassificationLedger"
-    /// Bump when retained-interval classification semantics change (requires one-time reconcile).
-    private static let classificationLedgerVersion = 2
 
     init() {
         AppDelegate.service = self
@@ -97,7 +92,6 @@ final class TrackingService: ObservableObject {
                 if meeting.lastConfirmed > meeting.start { try storage.addManual(ManualWork(start: meeting.start, end: meeting.lastConfirmed, kind: "user_declared_meeting_recovered")) }
                 try storage.remove("meetingCheckpoint")
             }
-            try migrateIntervalClassificationIfNeeded(storage: storage)
             refresh()
             loginEnabled = SMAppService.mainApp.status == .enabled
             collector.onObservation = { [weak self] observation in self?.observe(observation) }
@@ -121,7 +115,7 @@ final class TrackingService: ObservableObject {
     var menuTitle: String {
         if error != nil { return "Data gap" }
         if !running { return "Paused" }
-        if !engine.isCallCrediting && BrowserObserver.browsers.contains(currentApp) && browserObservation?.host == nil { return "Limited coverage" }
+        if !engine.isCallCrediting && BrowserObserver.browsers.contains(currentApp) && browserObservation.hostname(for: currentApp, at: Date()) == nil { return "Limited coverage" }
         if currentState == .unknown { return "Data gap" }
         return stablePace
     }
@@ -208,7 +202,7 @@ final class TrackingService: ObservableObject {
         engine.activeMS = Int64(settings.activeMinutes) * 60_000
         engine.passiveMS = Int64(settings.passiveMinutes) * 60_000
         apply(.pause(false), at: now)
-        browserObservation = nil; lastBrowserRead = .distantPast
+        browserObservation.reset(); lastBrowserRead = .distantPast
         running = true; accepting = true; settings.monitoringEnabled = true; settings.hasConsented = true
         do { try store?.save("settings", value: settings) } catch { fail(error); return }
         activityTransition = ActivityTransitionNotifier()
@@ -218,7 +212,7 @@ final class TrackingService: ObservableObject {
         collector.start(); flush()
     }
     func pause() {
-        accepting = false; collector.stop(); browserTask?.cancel(); browserTask = nil; browserObservation = nil
+        accepting = false; collector.stop(); browserTask?.cancel(); browserTask = nil; browserObservation.reset()
         apply(.pause(true), at: max(engine.boundary, Date().epochMS))
         running = false; status = "Paused"; settings.monitoringEnabled = false
         callStatus = "Call observation paused"
@@ -253,13 +247,13 @@ final class TrackingService: ObservableObject {
         if let (name, entering) = barriers[observation.event] { apply(.barrier(name, entering), at: now) }
         let app = observation.bundleID ?? ""
         if app != currentApp {
-            browserObservation = nil
+            browserObservation.reset()
             if BrowserObserver.browsers.contains(app) { lastBrowserRead = .distantPast }
         }
         currentApp = app
-        let freshHost = browserHost(for: app)
+        let freshHost = browserObservation.hostname(for: app, at: observation.timestamp)
         var source = RuleEvaluator.resolve(app: app, host: freshHost, rules: rules)
-        if browserObservation?.status == "Private browsing excluded" && browserObservation?.app == app { source.productivity = .ignored; source.ruleID = nil; source.privateBrowsing = true }
+        if browserObservation.latest?.status == "Private browsing excluded" && browserObservation.latest?.app == app { source.productivity = .ignored; source.ruleID = nil; source.privateBrowsing = true }
         apply(.foreground(source), at: now)
         if let idle = observation.idleMilliseconds, !app.isEmpty {
             apply(.observedIdle(idle), at: now)
@@ -286,40 +280,11 @@ final class TrackingService: ObservableObject {
                 guard let self else { return }
                 self.browserTask = nil
                 guard !Task.isCancelled, self.running, self.settings.browserEnabled, self.currentApp == value.app else { return }
-                self.recordBrowserObservation(value)
+                self.browserObservation.record(value)
                 self.browserStatus = value.status
                 // Domain events are observations, never input. Reconcile foreground at event delivery.
                 self.collector.sample(event: "domain_changed")
             }
-        }
-    }
-
-    private func migrateIntervalClassificationIfNeeded(storage: Store) throws {
-        let ledger = try storage.load(Self.classificationLedgerKey, as: Int.self) ?? 0
-        guard ledger < Self.classificationLedgerVersion else { return }
-        let updated = try storage.reconcileIntervalSources(rules: rules)
-        try storage.save(Self.classificationLedgerKey, value: Self.classificationLedgerVersion)
-        if updated > 0 {
-            message = "Reclassified \(updated) retained intervals using current browser hostname rules."
-        }
-    }
-
-    private func browserHost(for app: String) -> String? {
-        guard settings.browserEnabled, BrowserObserver.browsers.contains(app) else { return nil }
-        if let observation = browserObservation, observation.app == app, let host = observation.host, !host.isEmpty {
-            return host
-        }
-        return stickyBrowserHost[app]
-    }
-
-    private func recordBrowserObservation(_ value: BrowserObservation) {
-        browserObservation = value
-        if let host = value.host, !host.isEmpty {
-            stickyBrowserHost[value.app] = host
-            return
-        }
-        if value.status == "No supported website" || value.status == "Private browsing excluded" {
-            stickyBrowserHost.removeValue(forKey: value.app)
         }
     }
 

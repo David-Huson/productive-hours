@@ -85,3 +85,5 @@ Use History chart tooltips for daily totals and the Overview untracked-time brea
 ## Rule editing and activity alerts
 
 Rules support optional display names and inline Save/Revert editing. Settings changes show a floating Save/Revert bar. The menu-bar icon shows activity status. Activity alerts can warn before or when entering passive/inactive; they respect snoozes but ignore quiet hours. Weekly pace alerts still respect quiet hours. Upgrades preserve existing warning timing and saved settings.
+
+Browser hostnames expire after ten seconds. Failed reads, foreground-app changes, and tracking restarts clear attribution. Upgrades preserve recorded classifications; use the existing historical recalculation preview and undo controls to apply current rules to retained history.

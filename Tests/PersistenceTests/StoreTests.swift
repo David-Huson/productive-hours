@@ -115,3 +115,29 @@ private func location() -> URL { FileManager.default.temporaryDirectory.appendin
     #expect(try store.intervals().first?.productive == false)
     #expect(try store.intervals().first?.source.privateBrowsing == true)
 }
+
+@Test func forwardOnlyRuleEditsPreserveHistoryOnReopenUntilExplicitRecalculation() throws {
+    let url = location(); defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    let originalRule = ClassificationRule(kind: .app, pattern: "com.example.Editor", productivity: .productive)
+    var changedRule = originalRule
+    changedRule.productivity = .unproductive
+    changedRule.version += 1
+    let original = Interval(start: 0, end: 3_600_000,
+        source: RuleEvaluator.resolve(app: originalRule.pattern, host: nil, rules: [originalRule]), activity: .active)
+    do {
+        let store = try Store(url: url)
+        var engine = TrackingEngine(start: 0)
+        _ = engine.apply(.tick, at: original.end)
+        try store.commit([original], checkpoint: engine)
+        try store.saveRuleSet([originalRule])
+        try store.saveRuleSet([changedRule])
+    }
+    let reopened = try Store(url: url)
+    #expect(try reopened.intervals() == [original])
+    #expect(try reopened.load("rules", as: [ClassificationRule].self) == [changedRule])
+    #expect(try reopened.ruleRevisions().allSatisfy { $0.action == "forward_only" })
+    try reopened.reclassify(rules: [changedRule], previousRules: [changedRule], at: Date())
+    #expect(try reopened.intervals().first?.source.productivity == .unproductive)
+    _ = try reopened.undoReclassification()
+    #expect(try reopened.intervals() == [original])
+}
