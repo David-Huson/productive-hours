@@ -6,6 +6,7 @@ import ServiceManagement
 import ActivityCore
 import PlatformCollectors
 import Persistence
+import DiscordPresence
 
 @MainActor
 final class TrackingService: ObservableObject {
@@ -49,9 +50,11 @@ final class TrackingService: ObservableObject {
     private var engine = TrackingEngine(start: Date().epochMS)
     private var pending: [Interval] = []
     private let collector = PlatformCollector()
+    private let discordPresence = DiscordPresenceClient()
+    private var discordTrackingStartedAt: Date?
     private let browser = BrowserObserver()
     private var browserTask: Task<Void, Never>?
-    private var browserObservation: BrowserObservation?
+    private var browserObservation = BrowserObservationState()
     private var lastBrowserRead = Date.distantPast
     private var lastCommit = Date.distantPast
     private var lastRetention = Date.distantPast
@@ -93,6 +96,7 @@ final class TrackingService: ObservableObject {
             loginEnabled = SMAppService.mainApp.status == .enabled
             collector.onObservation = { [weak self] observation in self?.observe(observation) }
             refreshMenuBarActivityIndicator()
+            applyDiscordConfiguration()
             syncNotificationAuthorization()
             if settings.monitoringEnabled { start() }
             refreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
@@ -111,7 +115,7 @@ final class TrackingService: ObservableObject {
     var menuTitle: String {
         if error != nil { return "Data gap" }
         if !running { return "Paused" }
-        if !engine.isCallCrediting && BrowserObserver.browsers.contains(currentApp) && browserObservation?.host == nil { return "Limited coverage" }
+        if !engine.isCallCrediting && BrowserObserver.browsers.contains(currentApp) && browserObservation.hostname(for: currentApp, at: Date()) == nil { return "Limited coverage" }
         if currentState == .unknown { return "Data gap" }
         return stablePace
     }
@@ -134,6 +138,26 @@ final class TrackingService: ObservableObject {
             productivity: engine.source.productivity,
             activity: currentState
         )
+        refreshDiscordPresence()
+    }
+    private func applyDiscordConfiguration() {
+        discordPresence.configure(
+            enabled: settings.discordRichPresenceEnabled && settings.discordApplicationIdValid,
+            applicationId: settings.discordApplicationId)
+    }
+    private func refreshDiscordPresence() {
+        applyDiscordConfiguration()
+        let today = totals.first { settings.calendar.isDateInToday($0.date) }?.productive ?? 0
+        let formatted = DiscordPresenceCopy.format(
+            indicator: menuBarActivityIndicator,
+            todayProductive: today,
+            week: liveWeek,
+            calendar: settings.calendar,
+            showDaily: settings.discordShowDailyTotal,
+            showWeekly: settings.discordShowWeeklyTotal,
+            showBreakdown: settings.discordShowWeeklyBreakdown,
+            trackingStartedAt: discordTrackingStartedAt)
+        discordPresence.update(presence: formatted, tracking: running && error == nil)
     }
     var advice: String {
         if let error { return error }
@@ -178,20 +202,23 @@ final class TrackingService: ObservableObject {
         engine.activeMS = Int64(settings.activeMinutes) * 60_000
         engine.passiveMS = Int64(settings.passiveMinutes) * 60_000
         apply(.pause(false), at: now)
-        browserObservation = nil; lastBrowserRead = .distantPast
+        browserObservation.reset(); lastBrowserRead = .distantPast
         running = true; accepting = true; settings.monitoringEnabled = true; settings.hasConsented = true
         do { try store?.save("settings", value: settings) } catch { fail(error); return }
         activityTransition = ActivityTransitionNotifier()
         advanceModeWarning = AdvanceModeWarningState()
+        discordTrackingStartedAt = Date()
         refreshMenuBarActivityIndicator()
         collector.start(); flush()
     }
     func pause() {
-        accepting = false; collector.stop(); browserTask?.cancel(); browserTask = nil; browserObservation = nil
+        accepting = false; collector.stop(); browserTask?.cancel(); browserTask = nil; browserObservation.reset()
         apply(.pause(true), at: max(engine.boundary, Date().epochMS))
         running = false; status = "Paused"; settings.monitoringEnabled = false
         callStatus = "Call observation paused"
+        discordTrackingStartedAt = nil
         refreshMenuBarActivityIndicator()
+        discordPresence.shutdown()
         do { try store?.save("settings", value: settings) } catch { fail(error) }
         endMeeting(); flush()
     }
@@ -219,11 +246,14 @@ final class TrackingService: ObservableObject {
         let barriers: [String: (String, Bool)] = ["sleep": ("sleep", true), "wake": ("sleep", false), "display_sleep": ("display", true), "display_wake": ("display", false), "session_inactive": ("session", true), "session_active": ("session", false)]
         if let (name, entering) = barriers[observation.event] { apply(.barrier(name, entering), at: now) }
         let app = observation.bundleID ?? ""
-        if app != currentApp { browserObservation = nil }
+        if app != currentApp {
+            browserObservation.reset()
+            if BrowserObserver.browsers.contains(app) { lastBrowserRead = .distantPast }
+        }
         currentApp = app
-        let freshHost = browserObservation.flatMap { value in value.app == app && observation.timestamp.timeIntervalSince(value.observedAt) <= 10 ? value.host : nil }
+        let freshHost = browserObservation.hostname(for: app, at: observation.timestamp)
         var source = RuleEvaluator.resolve(app: app, host: freshHost, rules: rules)
-        if browserObservation?.status == "Private browsing excluded" && browserObservation?.app == app { source.productivity = .ignored; source.ruleID = nil; source.privateBrowsing = true }
+        if browserObservation.latest?.status == "Private browsing excluded" && browserObservation.latest?.app == app { source.productivity = .ignored; source.ruleID = nil; source.privateBrowsing = true }
         apply(.foreground(source), at: now)
         if let idle = observation.idleMilliseconds, !app.isEmpty {
             apply(.observedIdle(idle), at: now)
@@ -250,12 +280,14 @@ final class TrackingService: ObservableObject {
                 guard let self else { return }
                 self.browserTask = nil
                 guard !Task.isCancelled, self.running, self.settings.browserEnabled, self.currentApp == value.app else { return }
-                self.browserObservation = value; self.browserStatus = value.status
+                self.browserObservation.record(value)
+                self.browserStatus = value.status
                 // Domain events are observations, never input. Reconcile foreground at event delivery.
                 self.collector.sample(event: "domain_changed")
             }
         }
     }
+
     private func periodic() {
         if !running && error == nil && settings.hasConsented { apply(.tick, at: max(engine.boundary, Date().epochMS)); flush() }
         if let end = meetingEnd, Date() >= end { endMeeting() }
@@ -304,18 +336,25 @@ final class TrackingService: ObservableObject {
     func discardSettingsEdits() { editedSettings = settings }
     func saveSettings() {
         guard editedSettings.valid else { message = "Check timezone, target range, schedule, thresholds and retention."; return }
+        if editedSettings.discordRichPresenceEnabled && !editedSettings.discordApplicationIdValid {
+            message = "Enter a numeric Discord Application ID from the Developer Portal, or turn off Discord Rich Presence."
+            return
+        }
         let wasRunning = running
         if wasRunning { pause() }
         settings = editedSettings; settings.monitoringEnabled = wasRunning
         browserStatus = settings.browserEnabled ? "Waiting for supported browser" : "Browser tracking disabled"
-        do { try store?.save("settings", value: settings); error = nil; refresh(); if wasRunning { start() } }
+        do {
+            try store?.save("settings", value: settings)
+            error = nil
+            applyDiscordConfiguration()
+            refresh()
+            if wasRunning { start() }
+        }
         catch { fail(error) }
     }
-    func activityLabel(app: String, host: String?) -> String {
-        let resolved = RuleEvaluator.resolve(app: app, host: host, rules: rules)
-        if let ruleID = resolved.ruleID, let rule = rules.first(where: { $0.id == ruleID }) { return rule.label }
-        if let host, !host.isEmpty { return host }
-        return app.isEmpty ? "Unknown source" : app
+    func activityLabel(for source: Source) -> String {
+        ActivityLabel.label(for: source, rules: rules)
     }
     func normalizedRulePattern(kind: ClassificationRule.Kind, raw: String) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -461,6 +500,7 @@ final class TrackingService: ObservableObject {
             if FileManager.default.fileExists(atPath: diagnostics.path) { try FileManager.default.removeItem(at: diagnostics) }
             settings = AppSettings(); editedSettings = settings; rules = []; engine = TrackingEngine(start: Date().epochMS); pending = []; notificationDates = [:]; snoozedUntil = nil
             trace = DiagnosticTrace(fileURL: Self.directory.appending(path: "Diagnostics/phase-0.json")); typeSnoozes = [:]; forecastAlert = ForecastAlertState()
+            discordPresence.shutdown()
             error = nil; message = "Local activity, rules, references, settings and diagnostic data deleted."; refresh(); confirmDelete = false
             UNUserNotificationCenter.current().removeAllPendingNotificationRequests(); UNUserNotificationCenter.current().removeAllDeliveredNotifications()
         } catch { fail(error) }

@@ -3,6 +3,47 @@ import Testing
 @testable import ActivityCore
 
 private func date(_ text: String) -> Date { ISO8601DateFormatter().date(from: text)! }
+@Test func activityLabelUsesStoredHostRuleDisplayName() {
+    let github = ClassificationRule(
+        kind: .exactHost,
+        pattern: "github.com",
+        productivity: .productive,
+        displayName: "Github"
+    )
+    let chrome = ClassificationRule(
+        kind: .app,
+        pattern: "com.google.Chrome",
+        productivity: .productive,
+        displayName: "Chrome"
+    )
+    let rules = [chrome, github]
+    let source = Source(
+        app: "com.google.Chrome",
+        host: "github.com",
+        productivity: .productive,
+        ruleID: github.id,
+        ruleVersion: 1
+    )
+    #expect(ActivityLabel.label(for: source, rules: rules) == "Github")
+}
+
+@Test func activityLabelShowsHostnameForBrowserAppFallback() {
+    let chrome = ClassificationRule(
+        kind: .app,
+        pattern: "com.google.Chrome",
+        productivity: .productive,
+        displayName: "Chrome"
+    )
+    let source = Source(
+        app: "com.google.Chrome",
+        host: "chatgpt.com",
+        productivity: .productive,
+        ruleID: chrome.id,
+        ruleVersion: 1
+    )
+    #expect(ActivityLabel.label(for: source, rules: [chrome]) == "chatgpt.com")
+}
+
 @Test func ruleLabelPrefersDisplayName() {
     var rule = ClassificationRule(kind: .app, pattern: "com.todesktop.230313mzl4w4u92", productivity: .productive)
     #expect(rule.label == "com.todesktop.230313mzl4w4u92")
@@ -22,7 +63,8 @@ private func date(_ text: String) -> Date { ISO8601DateFormatter().date(from: te
     #expect(RuleEvaluator.resolve(app: "chrome", host: "private.work.example.com", rules: rules).productivity == .ignored)
     #expect(RuleEvaluator.resolve(app: "chrome", host: "a.work.example.com", rules: rules).productivity == .productive)
     #expect(RuleEvaluator.resolve(app: "chrome", host: "example.com", rules: rules).productivity == .unproductive)
-    #expect(RuleEvaluator.resolve(app: "chrome", host: "notexample.com", rules: rules).productivity == .productive)
+    #expect(RuleEvaluator.resolve(app: "chrome", host: "notexample.com", rules: rules).productivity == .undefined)
+    #expect(RuleEvaluator.resolve(app: "chrome", host: nil, rules: rules).productivity == .productive)
     #expect(RuleEvaluator.resolve(app: "chrome", host: nil, rules: []).productivity == .undefined)
     #expect(RuleEvaluator.hostname("https://example.com/private") == nil)
 }

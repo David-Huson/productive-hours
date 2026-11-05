@@ -48,7 +48,12 @@ public enum RuleEvaluator {
             if lhs.priority != rhs.priority { return lhs.priority > rhs.priority }
             return lhs.id < rhs.id
         }
-        let rule = matches.first
+        // App rules are fallback when hostname is unavailable. Known hosts require an explicit host/domain rule.
+        let rule = if safeHost != nil {
+            matches.first { $0.kind != .app }
+        } else {
+            matches.first
+        }
         return Source(app: app, host: safeHost, productivity: rule?.productivity ?? .undefined,
                       ruleID: rule?.id, ruleVersion: rule?.version ?? 0)
     }
@@ -88,11 +93,20 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var quietStart = 18
     public var quietEnd = 9
     public var browserEnabled = false
+    public var discordRichPresenceEnabled = false
+    public var discordApplicationId = ""
+    public var discordShowDailyTotal = true
+    public var discordShowWeeklyTotal = true
+    public var discordShowWeeklyBreakdown = true
     public var monitoringEnabled = false
     public var hasConsented = false
     public init() {}
+    public var discordApplicationIdValid: Bool {
+        let id = discordApplicationId.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !id.isEmpty && id.count <= 32 && id.allSatisfy(\.isNumber)
+    }
     private enum CodingKeys: String, CodingKey {
-        case timezone, weekStart, minimumHours, maximumHours, workdays, startHour, endHour, activeMinutes, passiveMinutes, retentionDays, notifications, idleWarningAfterSeconds, warnBeforePassiveSeconds, warnBeforeInactiveSeconds, warnWhenEnteringPassive, warnWhenEnteringInactive, quietStart, quietEnd, browserEnabled, monitoringEnabled, hasConsented
+        case timezone, weekStart, minimumHours, maximumHours, workdays, startHour, endHour, activeMinutes, passiveMinutes, retentionDays, notifications, idleWarningAfterSeconds, warnBeforePassiveSeconds, warnBeforeInactiveSeconds, warnWhenEnteringPassive, warnWhenEnteringInactive, quietStart, quietEnd, browserEnabled, discordRichPresenceEnabled, discordApplicationId, discordShowDailyTotal, discordShowWeeklyTotal, discordShowWeeklyBreakdown, monitoringEnabled, hasConsented
     }
 
     public init(from decoder: Decoder) throws {
@@ -116,6 +130,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
         quietStart = try values.decode(Int.self, forKey: .quietStart)
         quietEnd = try values.decode(Int.self, forKey: .quietEnd)
         browserEnabled = try values.decode(Bool.self, forKey: .browserEnabled)
+        discordRichPresenceEnabled = try values.decodeIfPresent(Bool.self, forKey: .discordRichPresenceEnabled) ?? false
+        discordApplicationId = try values.decodeIfPresent(String.self, forKey: .discordApplicationId) ?? ""
+        discordShowDailyTotal = try values.decodeIfPresent(Bool.self, forKey: .discordShowDailyTotal) ?? true
+        discordShowWeeklyTotal = try values.decodeIfPresent(Bool.self, forKey: .discordShowWeeklyTotal) ?? true
+        discordShowWeeklyBreakdown = try values.decodeIfPresent(Bool.self, forKey: .discordShowWeeklyBreakdown) ?? true
         monitoringEnabled = try values.decode(Bool.self, forKey: .monitoringEnabled)
         hasConsented = try values.decode(Bool.self, forKey: .hasConsented)
     }

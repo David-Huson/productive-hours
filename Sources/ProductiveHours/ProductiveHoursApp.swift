@@ -45,6 +45,7 @@ private func menuBarAccessibilityLabel(for indicator: MenuBarActivityIndicator, 
     case .unproductive: state = "Unproductive"
     case .hidden: state = title
     }
+    if indicator == .hidden { return "Worktempo: \(title)" }
     return "Worktempo: \(state)"
 }
 
