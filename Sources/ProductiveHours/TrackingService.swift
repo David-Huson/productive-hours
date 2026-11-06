@@ -38,7 +38,7 @@ final class TrackingService: ObservableObject {
     @Published var ruleDisplayName = ""
     @Published var ruleClass: ProductivityClass = .productive
     @Published var rulePriority = 0
-    @Published var preview: String?
+    @Published var preview: ReclassificationPreview?
     @Published var referenceDate = Date()
     @Published var referenceHours = 0.0
     @Published var referenceTimezone = TimeZone.current.identifier
@@ -66,7 +66,6 @@ final class TrackingService: ObservableObject {
     private var activityTransition = ActivityTransitionNotifier()
     private var archived: [ArchivedDay] = []
     private var notificationDates: [String: Date] = [:]
-    private var pendingRules: [ClassificationRule]?
     private var trace = DiagnosticTrace(fileURL: FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Application Support/ProductiveHours/Diagnostics/phase-0.json"))
     static let directory = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Application Support/ProductiveHours")
 
@@ -430,27 +429,26 @@ final class TrackingService: ObservableObject {
     }
     func removeRule(_ id: String) { saveRules(rules.filter { $0.id != id }) }
     func saveRules(_ new: [ClassificationRule]) {
+        preview = nil
         apply(.tick, at: max(engine.boundary, Date().epochMS)); flush()
         do { try store?.saveRuleSet(new); rules = new; ruleRevisions = try store?.ruleRevisions() ?? []; if accepting { collector.sample(event: "rules_changed") }; message = "Rules saved for future activity. Use Preview to recalculate retained history." }
         catch { fail(error) }
     }
     func previewReclassification() {
-        let before = intervals.filter(\.productive).reduce(0) { $0 + $1.seconds }
-        let after = intervals.reduce(0.0) { sum, interval in
-            if interval.source.privateBrowsing { return sum }
-            if interval.reason == "call_audio" { return sum + (interval.productive ? interval.seconds : 0) }
-            let source = RuleEvaluator.resolve(app: interval.source.app, host: interval.source.host, rules: rules)
-            return sum + (ActivityClassification(productivity: source.productivity, activity: interval.activity).creditsProductiveTime ? interval.seconds : 0)
-        }
-        pendingRules = rules
-        preview = "Retained productive time: \(Metrics.duration(before)) → \(Metrics.duration(after)). Archived summaries cannot be recalculated. This change can be undone."
+        preview = ReclassificationPreview(intervals: intervals, rules: rules)
     }
     func applyReclassification() {
-        guard let selected = pendingRules else { return }
-        do { try store?.reclassify(rules: selected, previousRules: rules, at: Date()); preview = nil; pendingRules = nil; refresh() }
+        guard let selected = preview else { return }
+        guard selected.matches(rules: rules) else {
+            preview = nil
+            message = "Rules changed. Preview again before applying to history."
+            return
+        }
+        do { try store?.reclassify(rules: selected.rules, previousRules: rules, at: Date()); preview = nil; refresh() }
         catch { fail(error) }
     }
     func undoReclassification() {
+        preview = nil
         do { if let previous = try store?.undoReclassification() { rules = previous; refresh(); message = "Last retained-history recalculation undone." } }
         catch { fail(error) }
     }
@@ -493,6 +491,7 @@ final class TrackingService: ObservableObject {
         do { try csv.write(to: url, atomically: true, encoding: .utf8); message = "Aggregated statistics exported." } catch { message = error.localizedDescription }
     }
     func deleteAll() {
+        preview = nil
         pause()
         do {
             try store?.deleteAll()

@@ -15,6 +15,7 @@ let package = Package(
         .systemLibrary(name: "CSQLite"),
         .target(name: "Persistence", dependencies: ["ActivityCore", "CSQLite"]),
         .target(name: "PlatformCollectors", dependencies: ["ActivityCore"]),
+        .target(name: "TimelinePresentation", dependencies: ["ActivityCore"]),
         .target(
             name: "DiscordRPCBridge",
             path: "Sources/DiscordRPCBridge",
@@ -28,11 +29,12 @@ let package = Package(
             linkerSettings: [.linkedFramework("AppKit"), .linkedFramework("CoreServices")]
         ),
         .target(name: "DiscordPresence", dependencies: ["DiscordRPCBridge", "ActivityCore"]),
-        .executableTarget(name: "ProductiveHours", dependencies: ["PlatformCollectors", "Persistence", "DiscordPresence"]),
+        .executableTarget(name: "ProductiveHours", dependencies: ["PlatformCollectors", "Persistence", "DiscordPresence", "TimelinePresentation"]),
         .executableTarget(name: "CrashHarness", dependencies: ["ActivityCore", "Persistence"]),
         .executableTarget(name: "CallProbe", dependencies: ["PlatformCollectors"]),
         .executableTarget(name: "PlatformProbe", dependencies: ["PlatformCollectors"]),
         .testTarget(name: "ActivityCoreTests", dependencies: ["ActivityCore"]),
+        .testTarget(name: "TimelinePresentationTests", dependencies: ["TimelinePresentation", "ActivityCore"]),
         .testTarget(name: "PlatformCollectorsTests", dependencies: ["PlatformCollectors"]),
         .testTarget(name: "PersistenceTests", dependencies: ["Persistence", "ActivityCore"])
     ]

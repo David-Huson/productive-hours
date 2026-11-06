@@ -63,7 +63,7 @@ private func date(_ text: String) -> Date { ISO8601DateFormatter().date(from: te
     #expect(RuleEvaluator.resolve(app: "chrome", host: "private.work.example.com", rules: rules).productivity == .ignored)
     #expect(RuleEvaluator.resolve(app: "chrome", host: "a.work.example.com", rules: rules).productivity == .productive)
     #expect(RuleEvaluator.resolve(app: "chrome", host: "example.com", rules: rules).productivity == .unproductive)
-    #expect(RuleEvaluator.resolve(app: "chrome", host: "notexample.com", rules: rules).productivity == .undefined)
+    #expect(RuleEvaluator.resolve(app: "chrome", host: "notexample.com", rules: rules).productivity == .productive)
     #expect(RuleEvaluator.resolve(app: "chrome", host: nil, rules: rules).productivity == .productive)
     #expect(RuleEvaluator.resolve(app: "chrome", host: nil, rules: []).productivity == .undefined)
     #expect(RuleEvaluator.hostname("https://example.com/private") == nil)

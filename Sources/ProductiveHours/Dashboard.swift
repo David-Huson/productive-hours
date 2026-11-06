@@ -30,6 +30,7 @@ struct Dashboard: View {
             TabView {
                 OverviewView(service: service).tabItem { Label("Overview", systemImage: "chart.bar") }
                 HistoryView(service: service).tabItem { Label("History", systemImage: "calendar") }
+                ActivityTimelineView(service: service).tabItem { Label("Timeline", systemImage: "chart.bar.xaxis") }
                 RulesView(service: service).tabItem { Label("Classifications", systemImage: "tag") }
                 CalibrationView(service: service).tabItem { Label("Calibration", systemImage: "equal.circle") }
                 SettingsView(service: service).tabItem { Label("Settings", systemImage: "gearshape") }
@@ -498,7 +499,24 @@ struct RulesView: View {
                 Button("Undo last recalculation") { service.undoReclassification() }
             }
             if let preview = service.preview {
-                Text(preview)
+                Text("Retained productive time: \(Metrics.duration(preview.before)) → \(Metrics.duration(preview.after))")
+                Text("All retained activity is recalculated using all saved rules, not just the last rule edited. Archived summaries are unchanged. You can undo an applied recalculation.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if preview.changes.isEmpty {
+                    Text("No change to productive time.").font(.callout)
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(preview.changes) { change in
+                                HStack {
+                                    Text(service.activityLabel(for: change.source))
+                                    Spacer()
+                                    Text("\(change.delta < 0 ? "−" : "+")\(Metrics.duration(abs(change.delta)))").monospacedDigit()
+                                }
+                            }
+                        }
+                    }.frame(maxHeight: 140)
+                }
                 HStack { Button("Apply to retained history") { service.applyReclassification() }; Button("Cancel") { service.preview = nil } }
             }
         }.padding(16)

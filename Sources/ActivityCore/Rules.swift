@@ -48,12 +48,8 @@ public enum RuleEvaluator {
             if lhs.priority != rhs.priority { return lhs.priority > rhs.priority }
             return lhs.id < rhs.id
         }
-        // App rules are fallback when hostname is unavailable. Known hosts require an explicit host/domain rule.
-        let rule = if safeHost != nil {
-            matches.first { $0.kind != .app }
-        } else {
-            matches.first
-        }
+        // Host rules rank above app rules; explicit app rules remain the fallback.
+        let rule = matches.first
         return Source(app: app, host: safeHost, productivity: rule?.productivity ?? .undefined,
                       ruleID: rule?.id, ruleVersion: rule?.version ?? 0)
     }

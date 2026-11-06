@@ -132,12 +132,7 @@ public final class Store {
     public func ruleRevisions() throws -> [RuleRevision] { try read("SELECT payload FROM rule_revisions ORDER BY rowid DESC") }
     public func reclassify(rules: [ClassificationRule], previousRules: [ClassificationRule], at time: Date) throws {
         let before = try intervals()
-        let after = before.map { row in
-            var result = row
-            if row.source.privateBrowsing || row.reason == "call_audio" { return row }
-            result.source = RuleEvaluator.resolve(app: row.source.app, host: row.source.host, rules: rules)
-            return result
-        }
+        let after = before.map { ReclassificationPreview.reclassified($0, rules: rules) }
         try transaction {
             let audit = RuleAudit(id: UUID().uuidString, date: time, before: before, previousRules: previousRules)
             try execute("INSERT INTO audit VALUES(?,?,?)", [.text(audit.id), .integer(time.epochMS), .text(try json(audit))])

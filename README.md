@@ -80,7 +80,7 @@ The overview burnup chart plots daily cumulative productive time, a dashed pace 
 
 ## Investigating activity
 
-Use History chart tooltips for daily totals and the Overview untracked-time breakdown for pauses and collection gaps. The experimental timeline was removed in v0.1.11 after reported interaction slowdowns. Recorded activity remains available in local storage.
+Use History chart tooltips for daily totals and the Overview untracked-time breakdown for pauses and collection gaps. The Timeline tab shows up to 31 days of retained detail as colored daily rows. Hover for exact interval times, classification, source, and reason; pinch or use the zoom buttons to inspect events, and drag or scroll horizontally to pan. Vertical lines show scheduled work hours. Blank space means no stored observation, not inactivity. Overview rendering collapses subpixel events; zoom to inspect individual events. Manual meetings and expired detail are excluded. The native renderer caches the chart and keeps pointer movement independent of dashboard updates.
 
 ## Rule editing and activity alerts
 

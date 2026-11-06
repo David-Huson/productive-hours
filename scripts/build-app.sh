@@ -19,8 +19,8 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIconFile</key><string>Worktempo</string>
 <key>CFBundleExecutable</key><string>ProductiveHours</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleVersion</key><string>15</string>
-<key>CFBundleShortVersionString</key><string>0.1.14</string>
+<key>CFBundleVersion</key><string>18</string>
+<key>CFBundleShortVersionString</key><string>0.1.17</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>
 <key>NSAppleEventsUsageDescription</key><string>With your permission, read the active Chrome, Edge or Arc tab hostname to classify productive time. Page content and full URLs are not stored.</string>
